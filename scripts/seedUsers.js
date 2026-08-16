@@ -3,8 +3,9 @@
  * passwords. Run with: npm run seed:users
  *
  * Usage:
- *   node scripts/seedUsers.js                     -> seeds default demo user
- *   node scripts/seedUsers.js <username> <password> -> adds/updates one user
+ *   node scripts/seedUsers.js                                  -> seeds default demo user
+ *   node scripts/seedUsers.js <username> <password>             -> adds/updates a warehouse_operator
+ *   node scripts/seedUsers.js <username> <password> admin       -> adds/updates an admin user
  */
 const fs = require('fs');
 const path = require('path');
@@ -14,17 +15,18 @@ const { LocalUserStore } = require('../src/auth/userStore');
 const storePath = path.resolve(process.env.USER_STORE_PATH || './data/users.json');
 
 async function main() {
-  const [, , argUsername, argPassword] = process.argv;
+  const [, , argUsername, argPassword, argRole] = process.argv;
 
   const existing = fs.existsSync(storePath) ? JSON.parse(fs.readFileSync(storePath, 'utf-8')) : [];
 
   if (argUsername && argPassword) {
+    const role = argRole === 'admin' ? 'admin' : 'warehouse_operator';
     const passwordHash = await LocalUserStore.hashPassword(argPassword);
     const idx = existing.findIndex((u) => u.username.toLowerCase() === argUsername.toLowerCase());
-    const record = { username: argUsername, passwordHash, role: 'warehouse_operator' };
+    const record = { username: argUsername, passwordHash, role };
     if (idx >= 0) existing[idx] = record;
     else existing.push(record);
-    console.log(`Upserted user "${argUsername}".`);
+    console.log(`Upserted ${role} user "${argUsername}".`);
   } else if (existing.length === 0) {
     // First run, no args — seed the demo operator matching the app's
     // default login field ("wh-jdoe") so a fresh checkout works end to end

@@ -42,6 +42,8 @@ module.exports = {
     expiresIn: process.env.JWT_EXPIRES_IN || '12h',
   },
   userStorePath: process.env.USER_STORE_PATH || './data/users.json',
+  scanExceptionStorePath: process.env.SCAN_EXCEPTION_STORE_PATH || './data/scan-exceptions.json',
+  verifyAuditStorePath: process.env.VERIFY_AUDIT_STORE_PATH || './data/verify-audit.json',
   corsOrigins: (process.env.CORS_ORIGINS || '')
     .split(',')
     .map((s) => s.trim())

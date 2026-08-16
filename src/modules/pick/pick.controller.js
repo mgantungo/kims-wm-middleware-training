@@ -12,11 +12,13 @@ async function getDocument(req, res) {
 }
 
 async function confirmItem(req, res) {
-  const { docId, sku, location, qty } = req.body || {};
+  const { docId, sku, location, qty, scanLog } = req.body || {};
   if (!docId || !sku || !location || qty == null) {
     throw ApiError.badRequest('docId, sku, location, and qty are required.');
   }
-  const result = await dataSource.confirmPickItem({ docId, sku, location, qty });
+  // scanLog is optional and additive — see putAway.controller.js for the
+  // same field.
+  const result = await dataSource.confirmPickItem({ docId, sku, location, qty, scanLog });
   res.status(201).json(result);
 }
 

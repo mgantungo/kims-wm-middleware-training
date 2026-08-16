@@ -33,7 +33,7 @@ class DemoDataSource {
   }
 
   async confirmPutAwayItem(payload) {
-    const { docId, sku } = payload;
+    const { docId, sku, scanLog } = payload;
     const doc = this._putAwayDocs[docId];
     if (!doc) throw ApiError.notFound(`Put away document "${docId}" not found.`);
     const item = doc.items.find((i) => i.sku === sku);
@@ -41,6 +41,11 @@ class DemoDataSource {
 
     doc._confirmed = doc._confirmed || new Set();
     doc._confirmed.add(sku);
+    // Kept alongside _confirmed rather than merged into the item itself —
+    // like _confirmed, this is confirmation bookkeeping, not document data,
+    // and stripInternal() already knows to drop keys prefixed with _.
+    doc._scanLogs = doc._scanLogs || {};
+    if (Array.isArray(scanLog)) doc._scanLogs[sku] = scanLog;
     doc.status = doc._confirmed.size >= doc.items.length ? 'complete' : 'inProgress';
     return { ok: true };
   }
@@ -59,7 +64,7 @@ class DemoDataSource {
   }
 
   async confirmPickItem(payload) {
-    const { docId, sku } = payload;
+    const { docId, sku, scanLog } = payload;
     const doc = this._pickDocs[docId];
     if (!doc) throw ApiError.notFound(`Pick document "${docId}" not found.`);
     const item = doc.items.find((i) => i.sku === sku);
@@ -67,6 +72,8 @@ class DemoDataSource {
 
     doc._confirmed = doc._confirmed || new Set();
     doc._confirmed.add(sku);
+    doc._scanLogs = doc._scanLogs || {};
+    if (Array.isArray(scanLog)) doc._scanLogs[sku] = scanLog;
     doc.status = doc._confirmed.size >= doc.items.length ? 'complete' : 'inProgress';
     return { ok: true };
   }
@@ -166,7 +173,7 @@ class DemoDataSource {
 }
 
 function stripInternal(doc) {
-  const { _confirmed, ...rest } = doc;
+  const { _confirmed, _scanLogs, ...rest } = doc;
   return rest;
 }
 

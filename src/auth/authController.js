@@ -26,8 +26,8 @@ async function login(req, res, next) {
       throw ApiError.unauthorized('Invalid username or password.');
     }
 
-    const token = issueToken({ username: user.username, environment: config.env });
-    res.json({ token, username: user.username, environment: config.env });
+    const token = issueToken({ username: user.username, environment: config.env, role: user.role });
+    res.json({ token, username: user.username, environment: config.env, role: user.role });
   } catch (err) {
     next(err);
   }

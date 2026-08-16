@@ -14,12 +14,31 @@
  * getPutAwayDocuments()                 -> { documents: PutAwayDocument[] }
  * getPutAwayDocument(docId)             -> PutAwayDocument
  * confirmPutAwayItem(payload)           -> { ok: true }
+ *   payload.scanLog (optional): [{ sequence, scannedAt }] — the per-unit
+ *   accepted-scan timeline behind payload.qty, when the item was scanned
+ *   unit-by-unit rather than confirmed as a single quantity. Additive only;
+ *   adapters that don't care about it can ignore the field.
  * getPickDocuments()                    -> { documents: PickDocument[] }
  * getPickDocument(docId)                -> PickDocument
  * confirmPickItem(payload)              -> { ok: true }
+ *   payload.scanLog (optional): same shape as confirmPutAwayItem above.
+ *
+ * Scan exceptions (wrong item / wrong bin / item not on this document,
+ * pushed immediately as they happen rather than bundled with a confirm
+ * call) are handled OUTSIDE this adapter interface entirely — see
+ * src/data/scanExceptionStore.js and src/modules/scanLogging/. They are
+ * middleware-generated audit records, not data read from or written
+ * through to Business Central, so they don't participate in the
+ * DATA_SOURCE=demo|businessCentral swap.
  * getUnverifiedPicks()                  -> { picks: VerifyPick[] }
  * getVerifyPick(orderId)                -> VerifyPick
  * submitVerifyPack(payload)             -> { ok: true }
+ *   payload.items[].scanLog (optional): [{ sequence, scannedAt }] — per-item
+ *   accepted-scan timeline, same shape as confirmPutAwayItem's scanLog.
+ *   Captured by verifyPack.controller.js into verifyAuditStore.js BEFORE
+ *   this call, since DemoDataSource removes the pick from its unverified
+ *   list as part of handling it — adapters don't need to do anything with
+ *   this field themselves unless they want to.
  * confirmShipLoad(payload)              -> { ok: true }
  * generateGatePass(payload)             -> GatePass
  * searchItem(query)                     -> ItemInquiryResult

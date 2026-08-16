@@ -20,7 +20,7 @@ function requireAuth(req, res, next) {
 
   try {
     const payload = jwt.verify(token, config.jwt.secret);
-    req.user = { username: payload.sub, environment: payload.env };
+    req.user = { username: payload.sub, environment: payload.env, role: payload.role };
     next();
   } catch (err) {
     next(ApiError.unauthorized('Your session has expired. Please log in again.'));
