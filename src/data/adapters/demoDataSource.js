@@ -260,7 +260,7 @@ function seedPickDocs() {
       ],
     },
     'WH-PICK-00127': {
-      docId: 'WH-PICK-00126',
+      docId: 'WH-PICK-00127',
       shipmentRef: 'WHS-10581',
       dueDate: inDays(0),
       status: 'assigned',
