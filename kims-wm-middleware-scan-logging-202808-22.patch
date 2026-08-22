@@ -1,0 +1,33 @@
+diff --git a/src/data/adapters/demoDataSource.js b/src/data/adapters/demoDataSource.js
+index 8e08c3c..043dbd9 100644
+--- a/src/data/adapters/demoDataSource.js
++++ b/src/data/adapters/demoDataSource.js
+@@ -236,6 +236,29 @@ function seedPickDocs() {
+       isHighPriority: false,
+       items: [{ sku: '44120-QQ', description: 'Canvas Tote Bag', qty: 2, location: 'B-09-02' }],
+     },
++    // Deliberately larger/messier than the others, for testing the
++    // walk-order Pick flow properly: 5 bins, 7 line items, 40 units total.
++    // SKU-BOLT-M6 is split across THREE separate bins (A-05-01, A-05-02,
++    // C-02-01) — the split-sku-across-bins scenario. A-05-01 and B-03-04
++    // each carry two different skus in one bin — the multiple-items-in-
++    // one-bin scenario. Walk order should come out sorted by bin address:
++    // A-05-01, A-05-02, B-01-01, B-03-04, C-02-01.
++    'WH-PICK-00126': {
++      docId: 'WH-PICK-00126',
++      shipmentRef: 'WHS-10571',
++      dueDate: inDays(2),
++      status: 'assigned',
++      isHighPriority: true,
++      items: [
++        { sku: 'SKU-BOLT-M6', description: 'Hex Bolt, M6 x 20mm', qty: 6, location: 'A-05-01' },
++        { sku: 'SKU-WASH-M6', description: 'Flat Washer, M6', qty: 8, location: 'A-05-01' },
++        { sku: 'SKU-BOLT-M6', description: 'Hex Bolt, M6 x 20mm', qty: 4, location: 'A-05-02' },
++        { sku: 'SKU-NAIL-2IN', description: 'Finish Nail, 2 inch', qty: 12, location: 'B-01-01' },
++        { sku: 'SKU-CLIP-RET', description: 'Retaining Clip', qty: 3, location: 'B-03-04' },
++        { sku: 'SKU-SCREW-M4', description: 'Machine Screw, M4', qty: 5, location: 'B-03-04' },
++        { sku: 'SKU-BOLT-M6', description: 'Hex Bolt, M6 x 20mm', qty: 2, location: 'C-02-01' },
++      ],
++    },
+   };
+ }
