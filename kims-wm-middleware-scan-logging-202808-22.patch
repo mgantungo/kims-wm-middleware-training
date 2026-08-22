@@ -1,8 +1,210 @@
+diff --git a/.env b/.env
+index 2938616..e5d024f 100644
+--- a/.env
++++ b/.env
+@@ -27,6 +27,12 @@ JWT_EXPIRES_IN=12h
+ # Azure AD auth is wired up. Keep this outside the repo in production.
+ USER_STORE_PATH=./data/users.json
+ 
++# Path to the scan-exception audit log (JSON file) — wrong item / wrong bin /
++# unrecognized item scans pushed from Put Away, Pick, and Verify. Independent
++# of DATA_SOURCE; this is middleware-generated audit data, not Business
++# Central data. Keep this outside the repo in production, same as above.
++SCAN_EXCEPTION_STORE_PATH=./data/scan-exceptions.json
++
+ # Comma-separated list of allowed CORS origins. The Flutter app doesn't run
+ # in a browser so this mainly matters if you ever add a web/admin client.
+ CORS_ORIGINS=
+diff --git a/scripts/seedUsers.js b/scripts/seedUsers.js
+index 24d0ddc..0ac9d2c 100644
+--- a/scripts/seedUsers.js
++++ b/scripts/seedUsers.js
+@@ -3,8 +3,9 @@
+  * passwords. Run with: npm run seed:users
+  *
+  * Usage:
+- *   node scripts/seedUsers.js                     -> seeds default demo user
+- *   node scripts/seedUsers.js <username> <password> -> adds/updates one user
++ *   node scripts/seedUsers.js                                  -> seeds default demo user
++ *   node scripts/seedUsers.js <username> <password>             -> adds/updates a warehouse_operator
++ *   node scripts/seedUsers.js <username> <password> admin       -> adds/updates an admin user
+  */
+ const fs = require('fs');
+ const path = require('path');
+@@ -14,17 +15,18 @@ const { LocalUserStore } = require('../src/auth/userStore');
+ const storePath = path.resolve(process.env.USER_STORE_PATH || './data/users.json');
+ 
+ async function main() {
+-  const [, , argUsername, argPassword] = process.argv;
++  const [, , argUsername, argPassword, argRole] = process.argv;
+ 
+   const existing = fs.existsSync(storePath) ? JSON.parse(fs.readFileSync(storePath, 'utf-8')) : [];
+ 
+   if (argUsername && argPassword) {
++    const role = argRole === 'admin' ? 'admin' : 'warehouse_operator';
+     const passwordHash = await LocalUserStore.hashPassword(argPassword);
+     const idx = existing.findIndex((u) => u.username.toLowerCase() === argUsername.toLowerCase());
+-    const record = { username: argUsername, passwordHash, role: 'warehouse_operator' };
++    const record = { username: argUsername, passwordHash, role };
+     if (idx >= 0) existing[idx] = record;
+     else existing.push(record);
+-    console.log(`Upserted user "${argUsername}".`);
++    console.log(`Upserted ${role} user "${argUsername}".`);
+   } else if (existing.length === 0) {
+     // First run, no args — seed the demo operator matching the app's
+     // default login field ("wh-jdoe") so a fresh checkout works end to end
+diff --git a/src/app.js b/src/app.js
+index 939f50a..a83e317 100644
+--- a/src/app.js
++++ b/src/app.js
+@@ -18,6 +18,7 @@ const verifyPackRoutes = require('./modules/verifyPack/verifyPack.routes');
+ const shipRoutes = require('./modules/ship/ship.routes');
+ const gatePassRoutes = require('./modules/gatePass/gatePass.routes');
+ const inquiryRoutes = require('./modules/inquiry/inquiry.routes');
++const scanLoggingRoutes = require('./modules/scanLogging/scanLogging.routes');
+ 
+ const app = express();
+ 
+@@ -63,6 +64,7 @@ app.use('/pick', requireAuth, pickRoutes);
+ app.use('/ship', requireAuth, shipRoutes);
+ app.use('/gate-pass', requireAuth, gatePassRoutes);
+ app.use('/inquiry', requireAuth, inquiryRoutes);
++app.use('/scan-logging', requireAuth, scanLoggingRoutes);
+ 
+ app.use(notFoundHandler);
+ app.use(errorHandler);
+diff --git a/src/auth/authController.js b/src/auth/authController.js
+index b171525..a14f622 100644
+--- a/src/auth/authController.js
++++ b/src/auth/authController.js
+@@ -26,8 +26,8 @@ async function login(req, res, next) {
+       throw ApiError.unauthorized('Invalid username or password.');
+     }
+ 
+-    const token = issueToken({ username: user.username, environment: config.env });
+-    res.json({ token, username: user.username, environment: config.env });
++    const token = issueToken({ username: user.username, environment: config.env, role: user.role });
++    res.json({ token, username: user.username, environment: config.env, role: user.role });
+   } catch (err) {
+     next(err);
+   }
+diff --git a/src/auth/jwtService.js b/src/auth/jwtService.js
+index 80fb9f8..7ac7f3f 100644
+--- a/src/auth/jwtService.js
++++ b/src/auth/jwtService.js
+@@ -6,8 +6,8 @@ const config = require('../config/env');
+  * one spot so it can't drift between login and any future token-refresh
+  * endpoint.
+  */
+-function issueToken({ username, environment }) {
+-  return jwt.sign({ sub: username, env: environment }, config.jwt.secret, {
++function issueToken({ username, environment, role }) {
++  return jwt.sign({ sub: username, env: environment, role }, config.jwt.secret, {
+     expiresIn: config.jwt.expiresIn,
+   });
+ }
+diff --git a/src/config/env.js b/src/config/env.js
+index cbc26b9..47a736e 100644
+--- a/src/config/env.js
++++ b/src/config/env.js
+@@ -42,6 +42,8 @@ module.exports = {
+     expiresIn: process.env.JWT_EXPIRES_IN || '12h',
+   },
+   userStorePath: process.env.USER_STORE_PATH || './data/users.json',
++  scanExceptionStorePath: process.env.SCAN_EXCEPTION_STORE_PATH || './data/scan-exceptions.json',
++  verifyAuditStorePath: process.env.VERIFY_AUDIT_STORE_PATH || './data/verify-audit.json',
+   corsOrigins: (process.env.CORS_ORIGINS || '')
+     .split(',')
+     .map((s) => s.trim())
+diff --git a/src/data/adapters/dataSource.interface.js b/src/data/adapters/dataSource.interface.js
+index 9d3b065..4ba30ad 100644
+--- a/src/data/adapters/dataSource.interface.js
++++ b/src/data/adapters/dataSource.interface.js
+@@ -14,12 +14,31 @@
+  * getPutAwayDocuments()                 -> { documents: PutAwayDocument[] }
+  * getPutAwayDocument(docId)             -> PutAwayDocument
+  * confirmPutAwayItem(payload)           -> { ok: true }
++ *   payload.scanLog (optional): [{ sequence, scannedAt }] — the per-unit
++ *   accepted-scan timeline behind payload.qty, when the item was scanned
++ *   unit-by-unit rather than confirmed as a single quantity. Additive only;
++ *   adapters that don't care about it can ignore the field.
+  * getPickDocuments()                    -> { documents: PickDocument[] }
+  * getPickDocument(docId)                -> PickDocument
+  * confirmPickItem(payload)              -> { ok: true }
++ *   payload.scanLog (optional): same shape as confirmPutAwayItem above.
++ *
++ * Scan exceptions (wrong item / wrong bin / item not on this document,
++ * pushed immediately as they happen rather than bundled with a confirm
++ * call) are handled OUTSIDE this adapter interface entirely — see
++ * src/data/scanExceptionStore.js and src/modules/scanLogging/. They are
++ * middleware-generated audit records, not data read from or written
++ * through to Business Central, so they don't participate in the
++ * DATA_SOURCE=demo|businessCentral swap.
+  * getUnverifiedPicks()                  -> { picks: VerifyPick[] }
+  * getVerifyPick(orderId)                -> VerifyPick
+  * submitVerifyPack(payload)             -> { ok: true }
++ *   payload.items[].scanLog (optional): [{ sequence, scannedAt }] — per-item
++ *   accepted-scan timeline, same shape as confirmPutAwayItem's scanLog.
++ *   Captured by verifyPack.controller.js into verifyAuditStore.js BEFORE
++ *   this call, since DemoDataSource removes the pick from its unverified
++ *   list as part of handling it — adapters don't need to do anything with
++ *   this field themselves unless they want to.
+  * confirmShipLoad(payload)              -> { ok: true }
+  * generateGatePass(payload)             -> GatePass
+  * searchItem(query)                     -> ItemInquiryResult
 diff --git a/src/data/adapters/demoDataSource.js b/src/data/adapters/demoDataSource.js
-index 8e08c3c..043dbd9 100644
+index 9b8a6cb..043dbd9 100644
 --- a/src/data/adapters/demoDataSource.js
 +++ b/src/data/adapters/demoDataSource.js
-@@ -236,6 +236,29 @@ function seedPickDocs() {
+@@ -33,7 +33,7 @@ class DemoDataSource {
+   }
+ 
+   async confirmPutAwayItem(payload) {
+-    const { docId, sku } = payload;
++    const { docId, sku, scanLog } = payload;
+     const doc = this._putAwayDocs[docId];
+     if (!doc) throw ApiError.notFound(`Put away document "${docId}" not found.`);
+     const item = doc.items.find((i) => i.sku === sku);
+@@ -41,6 +41,11 @@ class DemoDataSource {
+ 
+     doc._confirmed = doc._confirmed || new Set();
+     doc._confirmed.add(sku);
++    // Kept alongside _confirmed rather than merged into the item itself —
++    // like _confirmed, this is confirmation bookkeeping, not document data,
++    // and stripInternal() already knows to drop keys prefixed with _.
++    doc._scanLogs = doc._scanLogs || {};
++    if (Array.isArray(scanLog)) doc._scanLogs[sku] = scanLog;
+     doc.status = doc._confirmed.size >= doc.items.length ? 'complete' : 'inProgress';
+     return { ok: true };
+   }
+@@ -59,7 +64,7 @@ class DemoDataSource {
+   }
+ 
+   async confirmPickItem(payload) {
+-    const { docId, sku } = payload;
++    const { docId, sku, scanLog } = payload;
+     const doc = this._pickDocs[docId];
+     if (!doc) throw ApiError.notFound(`Pick document "${docId}" not found.`);
+     const item = doc.items.find((i) => i.sku === sku);
+@@ -67,6 +72,8 @@ class DemoDataSource {
+ 
+     doc._confirmed = doc._confirmed || new Set();
+     doc._confirmed.add(sku);
++    doc._scanLogs = doc._scanLogs || {};
++    if (Array.isArray(scanLog)) doc._scanLogs[sku] = scanLog;
+     doc.status = doc._confirmed.size >= doc.items.length ? 'complete' : 'inProgress';
+     return { ok: true };
+   }
+@@ -166,7 +173,7 @@ class DemoDataSource {
+ }
+ 
+ function stripInternal(doc) {
+-  const { _confirmed, ...rest } = doc;
++  const { _confirmed, _scanLogs, ...rest } = doc;
+   return rest;
+ }
+ 
+@@ -229,6 +236,29 @@ function seedPickDocs() {
        isHighPriority: false,
        items: [{ sku: '44120-QQ', description: 'Canvas Tote Bag', qty: 2, location: 'B-09-02' }],
      },
@@ -30,4 +232,423 @@ index 8e08c3c..043dbd9 100644
 +      ],
 +    },
    };
+ }
+ 
+diff --git a/src/data/scanExceptionStore.js b/src/data/scanExceptionStore.js
+new file mode 100644
+index 0000000..53d2247
+--- /dev/null
++++ b/src/data/scanExceptionStore.js
+@@ -0,0 +1,80 @@
++const fs = require('fs');
++const path = require('path');
++const crypto = require('crypto');
++const config = require('../config/env');
++const logger = require('../utils/logger');
++
++/**
++ * Local, file-backed audit log of rejected/mismatched scans (wrong item,
++ * wrong bin, item not on the active document) pushed from Put Away, Pick,
++ * and Verify on the device.
++ *
++ * This deliberately lives OUTSIDE the dataSource adapter pattern
++ * (dataSourceFactory / demoDataSource / businessCentralDataSource): a scan
++ * exception isn't Business Central data being read or written through — it's
++ * a record this middleware itself generates from device activity, and it
++ * needs to persist and be queryable by admins regardless of which data
++ * source is active or what Phase 2 looks like. Swapping DATA_SOURCE in .env
++ * has no bearing on this store.
++ *
++ * Same persistence approach as userStore.js: flat JSON file, loaded lazily,
++ * rewritten on every append. Fine for warehouse-floor exception volume;
++ * revisit if this ever needs concurrent multi-process writers.
++ */
++class LocalScanExceptionStore {
++  constructor(storePath) {
++    this.storePath = path.resolve(storePath);
++    this._records = null;
++  }
++
++  _load() {
++    if (this._records) return this._records;
++    if (!fs.existsSync(this.storePath)) {
++      this._records = [];
++      return this._records;
++    }
++    const raw = fs.readFileSync(this.storePath, 'utf-8');
++    this._records = raw.trim() ? JSON.parse(raw) : [];
++    return this._records;
++  }
++
++  _persist() {
++    fs.mkdirSync(path.dirname(this.storePath), { recursive: true });
++    fs.writeFileSync(this.storePath, JSON.stringify(this._records, null, 2));
++  }
++
++  /**
++   * Upserts by `localId` (the client-generated uuid from the device's
++   * scan_log_entries row) rather than always inserting. The device's
++   * SyncManager may retry this push after a dropped response even though
++   * the first attempt actually landed — upserting keeps a retried push from
++   * creating a duplicate audit entry.
++   */
++  append(record) {
++    const records = this._load();
++    const existingIdx = records.findIndex((r) => r.localId === record.localId);
++    const stored = { ...record, receivedAt: new Date().toISOString() };
++    if (existingIdx >= 0) {
++      records[existingIdx] = stored;
++    } else {
++      records.push(stored);
++    }
++    this._persist();
++    return stored;
++  }
++
++  query({ docId, status, limit = 100, offset = 0 } = {}) {
++    let records = this._load();
++    if (docId) records = records.filter((r) => r.docId === docId);
++    if (status) records = records.filter((r) => r.status === status);
++    records = [...records].sort((a, b) => (a.receivedAt < b.receivedAt ? 1 : -1));
++    return records.slice(offset, offset + limit);
++  }
++}
++
++const storePath = config.scanExceptionStorePath || './data/scan-exceptions.json';
++logger.info(`Scan exception audit store: ${path.resolve(storePath)}`);
++
++module.exports = new LocalScanExceptionStore(storePath);
++module.exports.LocalScanExceptionStore = LocalScanExceptionStore;
++module.exports.generateLocalId = () => crypto.randomUUID();
+diff --git a/src/data/verifyAuditStore.js b/src/data/verifyAuditStore.js
+new file mode 100644
+index 0000000..6d224ce
+--- /dev/null
++++ b/src/data/verifyAuditStore.js
+@@ -0,0 +1,62 @@
++const fs = require('fs');
++const path = require('path');
++const config = require('../config/env');
++const logger = require('../utils/logger');
++
++/**
++ * Persisted record of every /pick/verify/submit call, including each
++ * item's per-unit scanLog.
++ *
++ * Why this exists separately from demoDataSource: DemoDataSource deletes a
++ * pick from _verifyPicks the moment it's submitted (mirrors the prototype's
++ * "verified picks disappear from the list" behaviour) — so anything stored
++ * only on that in-memory object is gone within the same request. A loose
++ * item found mid-batch during verification needs to stay traceable after
++ * that point, not just until the list refreshes. Same reasoning as
++ * scanExceptionStore.js: this is middleware-generated audit data, not
++ * Business Central data, so it lives outside the dataSource adapter swap
++ * and persists identically regardless of DATA_SOURCE.
++ */
++class LocalVerifyAuditStore {
++  constructor(storePath) {
++    this.storePath = path.resolve(storePath);
++    this._records = null;
++  }
++
++  _load() {
++    if (this._records) return this._records;
++    if (!fs.existsSync(this.storePath)) {
++      this._records = [];
++      return this._records;
++    }
++    const raw = fs.readFileSync(this.storePath, 'utf-8');
++    this._records = raw.trim() ? JSON.parse(raw) : [];
++    return this._records;
++  }
++
++  _persist() {
++    fs.mkdirSync(path.dirname(this.storePath), { recursive: true });
++    fs.writeFileSync(this.storePath, JSON.stringify(this._records, null, 2));
++  }
++
++  append(record) {
++    const records = this._load();
++    const stored = { ...record, recordedAt: new Date().toISOString() };
++    records.push(stored);
++    this._persist();
++    return stored;
++  }
++
++  query({ orderId, limit = 100, offset = 0 } = {}) {
++    let records = this._load();
++    if (orderId) records = records.filter((r) => r.orderId === orderId);
++    records = [...records].sort((a, b) => (a.recordedAt < b.recordedAt ? 1 : -1));
++    return records.slice(offset, offset + limit);
++  }
++}
++
++const storePath = config.verifyAuditStorePath || './data/verify-audit.json';
++logger.info(`Verify audit store: ${path.resolve(storePath)}`);
++
++module.exports = new LocalVerifyAuditStore(storePath);
++module.exports.LocalVerifyAuditStore = LocalVerifyAuditStore;
+diff --git a/src/middleware/requireAdmin.js b/src/middleware/requireAdmin.js
+new file mode 100644
+index 0000000..1e43907
+--- /dev/null
++++ b/src/middleware/requireAdmin.js
+@@ -0,0 +1,31 @@
++const ApiError = require('../utils/apiError');
++
++/**
++ * Gates admin-only endpoints (currently: reading the scan-exception audit
++ * log). Deliberately does NOT do its own token verification — it relies on
++ * `requireAuth` having already run and populated `req.user.role` from the
++ * JWT. Mount order matters:
++ *
++ *   router.get('/exceptions', requireAuth, requireAdmin, handler);
++ *
++ * There is no separate admin credential store: `role` lives on the same
++ * user record in userStore.js as every operator, seeded via
++ * `npm run seed:users <username> <password>` with a "role": "admin" entry
++ * added to data/users.json afterward (or seed a dedicated script arg if
++ * that's added later). This keeps exactly one login flow (`POST
++ * /auth/login`) and exactly one place a device/app talks to for
++ * authentication, matching how the rest of this codebase avoids parallel
++ * paths for the same concern.
++ */
++function requireAdmin(req, res, next) {
++  if (!req.user) {
++    // Defensive — should be unreachable if requireAuth is mounted first.
++    return next(ApiError.unauthorized('Your session has expired. Please log in again.'));
++  }
++  if (req.user.role !== 'admin') {
++    return next(ApiError.forbidden('Admin access is required for this action.'));
++  }
++  next();
++}
++
++module.exports = requireAdmin;
+diff --git a/src/middleware/requireAuth.js b/src/middleware/requireAuth.js
+index df2f365..8a2ea7c 100644
+--- a/src/middleware/requireAuth.js
++++ b/src/middleware/requireAuth.js
+@@ -20,7 +20,7 @@ function requireAuth(req, res, next) {
+ 
+   try {
+     const payload = jwt.verify(token, config.jwt.secret);
+-    req.user = { username: payload.sub, environment: payload.env };
++    req.user = { username: payload.sub, environment: payload.env, role: payload.role };
+     next();
+   } catch (err) {
+     next(ApiError.unauthorized('Your session has expired. Please log in again.'));
+diff --git a/src/modules/pick/pick.controller.js b/src/modules/pick/pick.controller.js
+index 79fd204..1d717ca 100644
+--- a/src/modules/pick/pick.controller.js
++++ b/src/modules/pick/pick.controller.js
+@@ -12,11 +12,13 @@ async function getDocument(req, res) {
+ }
+ 
+ async function confirmItem(req, res) {
+-  const { docId, sku, location, qty } = req.body || {};
++  const { docId, sku, location, qty, scanLog } = req.body || {};
+   if (!docId || !sku || !location || qty == null) {
+     throw ApiError.badRequest('docId, sku, location, and qty are required.');
+   }
+-  const result = await dataSource.confirmPickItem({ docId, sku, location, qty });
++  // scanLog is optional and additive — see putAway.controller.js for the
++  // same field.
++  const result = await dataSource.confirmPickItem({ docId, sku, location, qty, scanLog });
+   res.status(201).json(result);
+ }
+ 
+diff --git a/src/modules/putAway/putAway.controller.js b/src/modules/putAway/putAway.controller.js
+index 3c2afa4..efd54b2 100644
+--- a/src/modules/putAway/putAway.controller.js
++++ b/src/modules/putAway/putAway.controller.js
+@@ -12,11 +12,15 @@ async function getDocument(req, res) {
+ }
+ 
+ async function confirmItem(req, res) {
+-  const { docId, sku, location, qty } = req.body || {};
++  const { docId, sku, location, qty, scanLog } = req.body || {};
+   if (!docId || !sku || !location || qty == null) {
+     throw ApiError.badRequest('docId, sku, location, and qty are required.');
+   }
+-  const result = await dataSource.confirmPutAwayItem({ docId, sku, location, qty });
++  // scanLog is optional and additive: the per-unit accepted-scan timeline
++  // ({ sequence, scannedAt }[]) behind `qty`, for audit purposes. Its
++  // absence (older app builds, or a line confirmed without unit-by-unit
++  // scanning) doesn't affect the existing confirm behaviour.
++  const result = await dataSource.confirmPutAwayItem({ docId, sku, location, qty, scanLog });
+   res.status(201).json(result);
+ }
+ 
+diff --git a/src/modules/scanLogging/scanLogging.controller.js b/src/modules/scanLogging/scanLogging.controller.js
+new file mode 100644
+index 0000000..49b0905
+--- /dev/null
++++ b/src/modules/scanLogging/scanLogging.controller.js
+@@ -0,0 +1,102 @@
++const scanExceptionStore = require('../../data/scanExceptionStore');
++const verifyAuditStore = require('../../data/verifyAuditStore');
++const ApiError = require('../../utils/apiError');
++
++const VALID_FLOW_TYPES = ['put_away', 'pick', 'verify'];
++const VALID_STATUSES = [
++  'rejected_item_mismatch',
++  'rejected_location_mismatch',
++  'rejected_unknown_item',
++  'rejected_target_met',
++];
++
++/**
++ * POST /scan-logging/exceptions
++ *
++ * Pushed by the device the moment a scan is rejected as a mismatch —
++ * independent of whether the operator ever confirms the document line it
++ * belongs to. Authenticated the same way every other device endpoint is
++ * (requireAuth, mounted in app.js), not admin-gated: this is a device
++ * writing its own activity, same trust level as confirming a put-away or
++ * pick line.
++ *
++ * Field names deliberately match /put-away/confirm and /pick/confirm
++ * (docId, sku) rather than inventing new ones — this API identifies a line
++ * the same way everywhere. `sku` is the expected item for the line being
++ * worked; for a rejected_unknown_item scan there may be no real line match,
++ * in which case `sku` is whatever the screen had loaded as its current
++ * target and `scannedRawValue` is what the scan actually decoded to.
++ */
++async function logException(req, res) {
++  const {
++    localId, docId, flowType, status,
++    deviceId, scannedAt, sku,
++    scannedRawValue, expectedLocation, scannedLocation,
++  } = req.body || {};
++
++  if (!localId || !docId || !flowType || !status || !deviceId || !scannedAt || !sku) {
++    throw ApiError.badRequest(
++      'localId, docId, flowType, status, deviceId, scannedAt, and sku are required.',
++    );
++  }
++  if (!VALID_FLOW_TYPES.includes(flowType)) {
++    throw ApiError.badRequest(`flowType must be one of: ${VALID_FLOW_TYPES.join(', ')}.`);
++  }
++  if (!VALID_STATUSES.includes(status)) {
++    throw ApiError.badRequest(`status must be one of: ${VALID_STATUSES.join(', ')}.`);
++  }
++
++  const stored = scanExceptionStore.append({
++    localId,
++    docId,
++    flowType,
++    status,
++    // req.user comes from requireAuth — trust the token's identity for
++    // who scanned, not whatever the request body claims.
++    operatorId: req.user.username,
++    deviceId,
++    scannedAt,
++    sku,
++    scannedRawValue: scannedRawValue || null,
++    expectedLocation: expectedLocation || null,
++    scannedLocation: scannedLocation || null,
++  });
++
++  res.status(201).json({ localId: stored.localId, accepted: true });
++}
++
++/**
++ * GET /scan-logging/exceptions
++ * Admin-only (requireAdmin, mounted in the route file). Optional filters:
++ * ?docId=...&status=...&limit=...&offset=...
++ */
++async function listExceptions(req, res) {
++  const { docId, status, limit, offset } = req.query;
++  const records = scanExceptionStore.query({
++    docId,
++    status,
++    limit: limit ? Number(limit) : undefined,
++    offset: offset ? Number(offset) : undefined,
++  });
++  res.json({ records });
++}
++
++/**
++ * GET /scan-logging/verify-submissions
++ * Admin-only. Optional filters: ?orderId=...&limit=...&offset=...
++ * Each record is a full /pick/verify/submit call, including every item's
++ * scanLog — the durable trail for tracing a loose or misplaced item found
++ * mid-batch back to when and in what sequence it was scanned, even though
++ * DemoDataSource removes the pick from the unverified list on submit.
++ */
++async function listVerifySubmissions(req, res) {
++  const { orderId, limit, offset } = req.query;
++  const records = verifyAuditStore.query({
++    orderId,
++    limit: limit ? Number(limit) : undefined,
++    offset: offset ? Number(offset) : undefined,
++  });
++  res.json({ records });
++}
++
++module.exports = { logException, listExceptions, listVerifySubmissions };
+diff --git a/src/modules/scanLogging/scanLogging.routes.js b/src/modules/scanLogging/scanLogging.routes.js
+new file mode 100644
+index 0000000..f7c7f84
+--- /dev/null
++++ b/src/modules/scanLogging/scanLogging.routes.js
+@@ -0,0 +1,22 @@
++const express = require('express');
++const asyncHandler = require('../../utils/asyncHandler');
++const requireAdmin = require('../../middleware/requireAdmin');
++const controller = require('./scanLogging.controller');
++
++const router = express.Router();
++
++// POST /scan-logging/exceptions — device push, same auth as every other
++// route in this group (requireAuth is applied where this router is
++// mounted in app.js, not here).
++router.post('/exceptions', asyncHandler(controller.logException));
++
++// GET /scan-logging/exceptions — admin-only audit view. requireAdmin runs
++// after the group-level requireAuth already populated req.user.
++router.get('/exceptions', requireAdmin, asyncHandler(controller.listExceptions));
++
++// GET /scan-logging/verify-submissions — admin-only. Full verify
++// submissions including each item's scanLog, for tracing loose/misplaced
++// items found during verification.
++router.get('/verify-submissions', requireAdmin, asyncHandler(controller.listVerifySubmissions));
++
++module.exports = router;
+diff --git a/src/modules/verifyPack/verifyPack.controller.js b/src/modules/verifyPack/verifyPack.controller.js
+index 9022df8..713f590 100644
+--- a/src/modules/verifyPack/verifyPack.controller.js
++++ b/src/modules/verifyPack/verifyPack.controller.js
+@@ -1,4 +1,5 @@
+ const dataSource = require('../../data/dataSourceFactory');
++const verifyAuditStore = require('../../data/verifyAuditStore');
+ const ApiError = require('../../utils/apiError');
+ 
+ async function listUnverified(req, res) {
+@@ -16,6 +17,25 @@ async function submit(req, res) {
+   if (!orderId || !Array.isArray(items)) {
+     throw ApiError.badRequest('orderId and items are required.');
+   }
++
++  // Recorded BEFORE the adapter call: DemoDataSource deletes the pick from
++  // its unverified list as part of submitVerifyPack, so anything not
++  // captured here first is gone the moment that call returns. Each item
++  // may carry its own scanLog ({ sequence, scannedAt }[]) — the per-unit
++  // accepted-scan timeline for that item, same shape and purpose as the
++  // scanLog on /put-away/confirm and /pick/confirm. Verify does this
++  // per-item rather than once for the whole submission because a single
++  // verify pass covers several items at once, and a loose/misplaced item
++  // found mid-batch needs to be traceable to which specific item's scan
++  // sequence it turned up in.
++  verifyAuditStore.append({
++    orderId,
++    operatorId: req.user.username,
++    items,
++    packages: packages || [],
++    submittedAt: new Date().toISOString(),
++  });
++
+   const result = await dataSource.submitVerifyPack({ orderId, items, packages: packages || [] });
+   res.status(201).json(result);
  }
