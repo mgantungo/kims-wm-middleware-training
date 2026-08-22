@@ -259,6 +259,22 @@ function seedPickDocs() {
         { sku: 'SKU-BOLT-M6', description: 'Hex Bolt, M6 x 20mm', qty: 2, location: 'C-02-01' },
       ],
     },
+    'WH-PICK-00127': {
+      docId: 'WH-PICK-00126',
+      shipmentRef: 'WHS-10581',
+      dueDate: inDays(0),
+      status: 'assigned',
+      isHighPriority: true,
+      items: [
+        { sku: 'SKU-BOLT-M6', description: 'Hex Bolt, M6 x 20mm', qty: 6, location: 'A-05-01' },
+        { sku: 'SKU-WASH-M6', description: 'Flat Washer, M6', qty: 8, location: 'A-05-01' },
+        { sku: 'SKU-BOLT-M6', description: 'Hex Bolt, M6 x 20mm', qty: 4, location: 'A-05-02' },
+        { sku: 'SKU-NAIL-2IN', description: 'Finish Nail, 2 inch', qty: 12, location: 'B-01-01' },
+        { sku: 'SKU-CLIP-RET', description: 'Retaining Clip', qty: 3, location: 'B-03-04' },
+        { sku: 'SKU-SCREW-M4', description: 'Machine Screw, M4', qty: 5, location: 'B-03-04' },
+        { sku: 'SKU-BOLT-M6', description: 'Hex Bolt, M6 x 20mm', qty: 2, location: 'C-02-01' },
+      ],
+    }
   };
 }
 
