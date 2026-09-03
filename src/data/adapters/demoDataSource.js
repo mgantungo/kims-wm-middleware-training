@@ -211,6 +211,9 @@ function seedPutAwayDocs() {
       docId: 'PA-00125',
       sourceWarehouseReceipt: 'WHR-54323',
       status: 'inProgress',
+      // Where this batch is currently staged, distinct from each item's
+      // own `location` below (its PUT AWAY TO destination bin).
+      receivedFromLocation: 'DOCK-1',
       items: [
         { sku: 'SKU-1001', description: '12oz Organic Coffee Beans', qty: 50, location: 'RCV-A1' },
         { sku: 'SKU-1002', description: 'Stainless Steel Mixing Bowl', qty: 20, location: 'RCV-A2' },
@@ -220,12 +223,14 @@ function seedPutAwayDocs() {
       docId: 'PA-00123',
       sourceWarehouseReceipt: 'WHR-54321',
       status: 'assigned',
+      receivedFromLocation: 'DOCK-2',
       items: [{ sku: 'SKU-2001', description: 'Cotton Packing Blankets', qty: 40, location: 'RCV-B1' }],
     },
     'PA-00124': {
       docId: 'PA-00124',
       sourceWarehouseReceipt: 'WHR-54322',
       status: 'assigned',
+      receivedFromLocation: 'DOCK-1',
       items: [{ sku: 'SKU-3001', description: 'Galvanized Steel Brackets', qty: 75, location: 'RCV-B2' }],
     },
   };
