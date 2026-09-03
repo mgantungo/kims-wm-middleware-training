@@ -34,6 +34,7 @@ class BusinessCentralDataSource {
   async getPutAwayDocuments() { return this._notImplemented('getPutAwayDocuments'); }
   async getPutAwayDocument() { return this._notImplemented('getPutAwayDocument'); }
   async confirmPutAwayItem() { return this._notImplemented('confirmPutAwayItem'); }
+  async validatePutAwayBin() { return this._notImplemented('validatePutAwayBin'); }
   async getPickDocuments() { return this._notImplemented('getPickDocuments'); }
   async getPickDocument() { return this._notImplemented('getPickDocument'); }
   async confirmPickItem() { return this._notImplemented('confirmPickItem'); }

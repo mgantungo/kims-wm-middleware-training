@@ -24,4 +24,16 @@ async function confirmItem(req, res) {
   res.status(201).json(result);
 }
 
-module.exports = { listDocuments, getDocument, confirmItem };
+async function validateBin(req, res) {
+  const { docId, binCode, sku, qty } = req.body || {};
+  if (!docId || !binCode || !sku || qty == null) {
+    throw ApiError.badRequest('docId, binCode, sku, and qty are required.');
+  }
+  // Not a scan confirmation and not outbox material — the operator is
+  // waiting live on Business Central's accept/reject before scanning
+  // continues, so this call is synchronous and never queued.
+  const result = await dataSource.validatePutAwayBin({ docId, binCode, sku, qty });
+  res.status(200).json(result);
+}
+
+module.exports = { listDocuments, getDocument, confirmItem, validateBin };

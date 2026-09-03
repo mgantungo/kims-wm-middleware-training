@@ -18,6 +18,17 @@
  *   accepted-scan timeline behind payload.qty, when the item was scanned
  *   unit-by-unit rather than confirmed as a single quantity. Additive only;
  *   adapters that don't care about it can ignore the field.
+ * validatePutAwayBin(payload)           -> { accepted: boolean, reason?: string }
+ *   payload: { docId, binCode, sku, qty }
+ *   Put-away split-bin flow only: when a bin comes up short of its expected
+ *   quantity, the operator scans a new candidate bin for the remainder and
+ *   this call asks Business Central whether that bin is free to receive it.
+ *   Synchronous/blocking from the Flutter app's point of view — the operator
+ *   is waiting on accepted/rejected before they can proceed, so this is NOT
+ *   part of the offline sync_queue outbox the way confirmPutAwayItem is.
+ *   A rejection (bin occupied/reserved/invalid) is a normal response, not a
+ *   thrown error — only missing/malformed fields should throw
+ *   ApiError.badRequest, same convention as confirmPutAwayItem.
  * getPickDocuments()                    -> { documents: PickDocument[] }
  * getPickDocument(docId)                -> PickDocument
  * confirmPickItem(payload)              -> { ok: true }

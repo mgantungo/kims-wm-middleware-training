@@ -17,6 +17,15 @@ class DemoDataSource {
     this._pickDocs = seedPickDocs();
     this._verifyPicks = seedVerifyPicks();
     this._gatePassSeq = 800;
+
+    // Split-bin validation (put-away short/split flow only). A small fixed
+    // "free bins" pool for demo/training purposes — a real Business Central
+    // adapter would check actual bin occupancy instead. _consumedSplitBins
+    // tracks bins already handed out during this server session so a
+    // repeat scan of the same bin correctly rejects on the second attempt,
+    // simulating BC marking a bin occupied once assigned.
+    this._freeSplitBins = new Set(['BIN-A01-03', 'BIN-A01-04', 'BIN-B02-01', 'BIN-C03-07']);
+    this._consumedSplitBins = new Set();
   }
 
   // ------------------------------------------------------------------
@@ -48,6 +57,25 @@ class DemoDataSource {
     if (Array.isArray(scanLog)) doc._scanLogs[sku] = scanLog;
     doc.status = doc._confirmed.size >= doc.items.length ? 'complete' : 'inProgress';
     return { ok: true };
+  }
+
+  async validatePutAwayBin(payload) {
+    const { docId, binCode, sku, qty } = payload || {};
+    if (!docId || !binCode || !sku || qty == null) {
+      throw ApiError.badRequest('docId, binCode, sku, and qty are required.');
+    }
+
+    const normalized = String(binCode).trim().toUpperCase();
+
+    if (this._consumedSplitBins.has(normalized)) {
+      return { accepted: false, reason: 'Bin already assigned to another split.' };
+    }
+    if (!this._freeSplitBins.has(normalized)) {
+      return { accepted: false, reason: 'Bin is occupied or not recognized.' };
+    }
+
+    this._consumedSplitBins.add(normalized);
+    return { accepted: true };
   }
 
   // ------------------------------------------------------------------
