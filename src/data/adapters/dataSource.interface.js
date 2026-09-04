@@ -20,15 +20,18 @@
  *   adapters that don't care about it can ignore the field.
  * validatePutAwayBin(payload)           -> { accepted: boolean, reason?: string }
  *   payload: { docId, binCode, sku, qty }
- *   Put-away split-bin flow only: when a bin comes up short of its expected
- *   quantity, the operator scans a new candidate bin for the remainder and
- *   this call asks Business Central whether that bin is free to receive it.
- *   Synchronous/blocking from the Flutter app's point of view — the operator
- *   is waiting on accepted/rejected before they can proceed, so this is NOT
- *   part of the offline sync_queue outbox the way confirmPutAwayItem is.
- *   A rejection (bin occupied/reserved/invalid) is a normal response, not a
- *   thrown error — only missing/malformed fields should throw
- *   ApiError.badRequest, same convention as confirmPutAwayItem.
+ *   Operator-scanned-candidate path — kept for a possible future manual
+ *   override, not currently wired to the app's "Stop & Split" button.
+ * suggestPutAwayBin(payload)            -> { available: boolean, binCode?, isTopUp?, currentQty?, capacityRemaining?, reason? }
+ *   payload: { docId, sku, qty, excludeBinCode? }
+ *   "Stop & Split" flow: the operator does NOT choose a bin — this asks
+ *   Business Central to find one with enough free capacity for the
+ *   remainder, which may be an empty bin OR a "topup" of a bin already
+ *   holding the same sku (isTopUp: true, with currentQty being that bin's
+ *   quantity BEFORE this reservation). available: false is a normal
+ *   response (no suitable bin right now), not an error — only missing
+ *   required fields should throw ApiError.badRequest, same convention as
+ *   confirmPutAwayItem/validatePutAwayBin.
  * getPickDocuments()                    -> { documents: PickDocument[] }
  * getPickDocument(docId)                -> PickDocument
  * confirmPickItem(payload)              -> { ok: true }

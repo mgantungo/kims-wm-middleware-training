@@ -36,4 +36,16 @@ async function validateBin(req, res) {
   res.status(200).json(result);
 }
 
-module.exports = { listDocuments, getDocument, confirmItem, validateBin };
+async function suggestBin(req, res) {
+  const { docId, sku, qty, excludeBinCode } = req.body || {};
+  if (!docId || !sku || qty == null) {
+    throw ApiError.badRequest('docId, sku, and qty are required.');
+  }
+  // Same "live and blocking, never queued" reasoning as validateBin — the
+  // operator is watching the split-bin animation waiting on this to
+  // resolve, not something the offline outbox should ever replay.
+  const result = await dataSource.suggestPutAwayBin({ docId, sku, qty, excludeBinCode });
+  res.status(200).json(result);
+}
+
+module.exports = { listDocuments, getDocument, confirmItem, validateBin, suggestBin };

@@ -18,14 +18,35 @@ class DemoDataSource {
     this._verifyPicks = seedVerifyPicks();
     this._gatePassSeq = 800;
 
-    // Split-bin validation (put-away short/split flow only). A small fixed
-    // "free bins" pool for demo/training purposes — a real Business Central
-    // adapter would check actual bin occupancy instead. _consumedSplitBins
-    // tracks bins already handed out during this server session so a
-    // repeat scan of the same bin correctly rejects on the second attempt,
-    // simulating BC marking a bin occupied once assigned.
+    // Split-bin validation (put-away short/split flow, operator-scanned
+    // candidate path). Kept for a possible future manual-override route —
+    // not currently called by the app's "Stop & Split" flow, which now
+    // uses suggestPutAwayBin below instead of asking the operator to scan
+    // a candidate themselves.
     this._freeSplitBins = new Set(['BIN-A01-03', 'BIN-A01-04', 'BIN-B02-01', 'BIN-C03-07']);
     this._consumedSplitBins = new Set();
+
+    // Physical bin capacity registry, for the "Stop & Split" auto-suggest
+    // flow (see suggestPutAwayBin). Represents each bin's REAL physical
+    // capacity, independent of what any one put-away document planned for
+    // it — e.g. RCV-B1 below has a real capacity of 30 even though
+    // PA-00123 plans to put 40 units there, which is exactly the "planned
+    // 70, physically only holds 50" scenario described for the feature:
+    // the shortfall isn't a data error, it's a genuine physical
+    // constraint the operator discovers on the floor.
+    this._binRegistry = {
+      'RCV-A1': { capacity: 50, occupantSku: null, currentQty: 0 },
+      'RCV-A2': { capacity: 20, occupantSku: null, currentQty: 0 },
+      'RCV-B1': { capacity: 30, occupantSku: null, currentQty: 0 },
+      'RCV-B2': { capacity: 75, occupantSku: null, currentQty: 0 },
+      // Candidate destinations the app can be handed back by
+      // suggestPutAwayBin — a mix of empty bins and a bin already holding
+      // stock of PA-00123's sku, to exercise both the "empty bin" and
+      // "topup" paths.
+      'RCV-B1-ALT': { capacity: 40, occupantSku: null, currentQty: 0 },
+      'RCV-C1': { capacity: 60, occupantSku: 'SKU-2001', currentQty: 15 },
+      'RCV-C2': { capacity: 25, occupantSku: null, currentQty: 0 },
+    };
   }
 
   // ------------------------------------------------------------------
@@ -76,6 +97,58 @@ class DemoDataSource {
 
     this._consumedSplitBins.add(normalized);
     return { accepted: true };
+  }
+
+  /// Auto-suggest flow for the "Stop & Split" button. The operator does
+  /// NOT scan a candidate here — the app asks the middleware to find one,
+  /// which may be an empty bin or a "topup" of a bin already holding the
+  /// same sku. Prefers a topup over an empty bin (consolidating stock is
+  /// generally preferable to spreading it further), and picks the
+  /// smallest empty bin that still fits the remainder as a best-fit
+  /// tiebreak among empty candidates.
+  ///
+  /// Reserves the chosen bin's capacity immediately (updates the
+  /// registry) rather than waiting for the operator's eventual /confirm
+  /// call, so two concurrent short/split events can't both be handed the
+  /// same capacity — mirroring how a real WMS would place a soft
+  /// allocation hold at suggestion time.
+  async suggestPutAwayBin(payload) {
+    const { docId, sku, qty, excludeBinCode } = payload || {};
+    if (!docId || !sku || qty == null) {
+      throw ApiError.badRequest('docId, sku, and qty are required.');
+    }
+
+    const excluded = excludeBinCode ? String(excludeBinCode).trim().toUpperCase() : null;
+    const entries = Object.entries(this._binRegistry).filter(([code]) => code !== excluded);
+
+    const topUpCandidates = entries
+      .filter(([, bin]) => bin.occupantSku === sku && bin.capacity - bin.currentQty >= qty)
+      .sort((a, b) => b[1].currentQty - a[1].currentQty); // prefer the fullest existing stock first
+
+    const chosen = topUpCandidates.length > 0
+      ? topUpCandidates[0]
+      : entries
+          .filter(([, bin]) => !bin.occupantSku && bin.capacity >= qty)
+          .sort((a, b) => a[1].capacity - b[1].capacity)[0]; // best-fit among empty bins
+
+    if (!chosen) {
+      return { available: false, reason: `No bin with ${qty} units of free capacity was found.` };
+    }
+
+    const [binCode, bin] = chosen;
+    const isTopUp = bin.occupantSku === sku;
+    const currentQtyBeforeReservation = bin.currentQty;
+
+    bin.currentQty += qty;
+    if (!bin.occupantSku) bin.occupantSku = sku;
+
+    return {
+      available: true,
+      binCode,
+      isTopUp,
+      currentQty: currentQtyBeforeReservation,
+      capacityRemaining: bin.capacity - bin.currentQty,
+    };
   }
 
   // ------------------------------------------------------------------
