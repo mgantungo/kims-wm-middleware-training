@@ -58,5 +58,27 @@
  * searchItem(query)                     -> ItemInquiryResult
  * searchBin(code)                       -> BinInquiryResult
  * trackPallet(palletId)                 -> PalletTrackingResult
+ *
+ * -- Item Transfer -----------------------------------------------------
+ * getTransferSourceBin(binCode)         -> { binCode: string, items: [{ sku, description, availableQty }] }
+ *   Ad-hoc entry point: unlike Put Away/Pick, Transfer has no assigned
+ *   document to select first. The operator scans whatever bin they're
+ *   standing at and this returns what's genuinely there to move. An empty
+ *   `items` array is a normal response (empty/unrecognized bin), not an
+ *   error.
+ * validateTransferBin(payload)          -> { accepted: boolean, reason?: string }
+ *   payload: { sourceBinCode, destinationBinCode, sku, qty }
+ *   Live, blocking, never outbox-queued — same reasoning as
+ *   validatePutAwayBin. Checks the destination has enough free capacity
+ *   AND (is empty OR already holds the same sku) — a bin holding a
+ *   different sku is always rejected, regardless of capacity.
+ * confirmTransfer(payload)              -> { ok: true }
+ *   payload: { sourceBinCode, destinationBinCode, sku, qty, reasonCode?,
+ *   reasonNote?, scanLog? }
+ *   Local-first / outbox-queued on the client, same as confirmPutAwayItem.
+ *   Decrements the source bin's on-hand qty and increments the
+ *   destination's by [qty] — this is a real stock movement, not a flag.
+ *   reasonCode is one of 'repair' | 'consolidation' | 'other' | null
+ *   (optional — Transfer's reason is not required, unlike Quarantine's).
  */
 module.exports = {};

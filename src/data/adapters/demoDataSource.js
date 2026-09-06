@@ -26,14 +26,14 @@ class DemoDataSource {
     this._freeSplitBins = new Set(['BIN-A01-03', 'BIN-A01-04', 'BIN-B02-01', 'BIN-C03-07']);
     this._consumedSplitBins = new Set();
 
-    // Physical bin capacity registry, for the "Stop & Split" auto-suggest
-    // flow (see suggestPutAwayBin). Represents each bin's REAL physical
-    // capacity, independent of what any one put-away document planned for
-    // it — e.g. RCV-B1 below has a real capacity of 30 even though
-    // PA-00123 plans to put 40 units there, which is exactly the "planned
-    // 70, physically only holds 50" scenario described for the feature:
-    // the shortfall isn't a data error, it's a genuine physical
-    // constraint the operator discovers on the floor.
+    // Physical bin capacity/occupancy registry. Shared across Put Away's
+    // "Stop & Split" auto-suggest flow AND Item Transfer — a single
+    // source of truth for what's physically in each bin, so a transfer
+    // out of RCV-C1 and a put-away topup into RCV-C1 can never disagree
+    // about how much SKU-2001 is actually there. One sku per bin at a
+    // time is a deliberate simplification (occupantSku is null when
+    // empty), matching how the physical floor bins in this warehouse
+    // actually work.
     this._binRegistry = {
       'RCV-A1': { capacity: 50, occupantSku: null, currentQty: 0 },
       'RCV-A2': { capacity: 20, occupantSku: null, currentQty: 0 },
@@ -46,6 +46,31 @@ class DemoDataSource {
       'RCV-B1-ALT': { capacity: 40, occupantSku: null, currentQty: 0 },
       'RCV-C1': { capacity: 60, occupantSku: 'SKU-2001', currentQty: 15 },
       'RCV-C2': { capacity: 25, occupantSku: null, currentQty: 0 },
+      // Floor storage bins seeded with stock, for exercising Item
+      // Transfer's "scan a source bin that already has something in it"
+      // flow independent of any put-away document.
+      'A-05-01': { capacity: 40, occupantSku: 'SKU-BOLT-M6', currentQty: 18 },
+      'A-05-02': { capacity: 40, occupantSku: 'SKU-BOLT-M6', currentQty: 6 },
+      'B-01-01': { capacity: 60, occupantSku: 'SKU-NAIL-2IN', currentQty: 24 },
+      'B-03-04': { capacity: 30, occupantSku: 'SKU-CLIP-RET', currentQty: 9 },
+      'C-02-01': { capacity: 40, occupantSku: null, currentQty: 0 },
+      'REPAIR-STAGING': { capacity: 200, occupantSku: null, currentQty: 0 },
+    };
+
+    // Item descriptions, for bins whose sku doesn't already come attached
+    // to one via a put-away/pick document line. Transfer's source-bin
+    // lookup needs a human-readable description even for a bin that was
+    // only ever populated by seed data or a prior transfer.
+    this._itemDescriptions = {
+      'SKU-1001': '12oz Organic Coffee Beans',
+      'SKU-1002': 'Stainless Steel Mixing Bowl',
+      'SKU-2001': 'Cotton Packing Blankets',
+      'SKU-3001': 'Galvanized Steel Brackets',
+      'SKU-BOLT-M6': 'Hex Bolt, M6 x 20mm',
+      'SKU-WASH-M6': 'Flat Washer, M6',
+      'SKU-NAIL-2IN': 'Finish Nail, 2 inch',
+      'SKU-CLIP-RET': 'Retaining Clip',
+      'SKU-SCREW-M4': 'Machine Screw, M4',
     };
   }
 
@@ -71,9 +96,6 @@ class DemoDataSource {
 
     doc._confirmed = doc._confirmed || new Set();
     doc._confirmed.add(sku);
-    // Kept alongside _confirmed rather than merged into the item itself —
-    // like _confirmed, this is confirmation bookkeeping, not document data,
-    // and stripInternal() already knows to drop keys prefixed with _.
     doc._scanLogs = doc._scanLogs || {};
     if (Array.isArray(scanLog)) doc._scanLogs[sku] = scanLog;
     doc.status = doc._confirmed.size >= doc.items.length ? 'complete' : 'inProgress';
@@ -197,10 +219,6 @@ class DemoDataSource {
     if (!this._verifyPicks[orderId]) {
       throw ApiError.notFound(`Pick #${orderId} not found or already verified.`);
     }
-    // In a real Business Central adapter this is where over/under-pick
-    // quantity adjustments get posted. Here we just retire the pick from
-    // the "unverified" list so it disappears from the list screen, mirroring
-    // the prototype's return-to-list behaviour after completion.
     delete this._verifyPicks[orderId];
     return { ok: true };
   }
@@ -234,8 +252,6 @@ class DemoDataSource {
   // Inquiries (read-only)
   // ------------------------------------------------------------------
   async searchItem(query) {
-    // Demo adapter ignores the query and always returns the seeded item —
-    // enough to exercise the full UI without a real catalog behind it.
     return {
       sku: 'HDW-8821-BLT',
       name: 'Steel Bolt 10mm',
@@ -271,6 +287,94 @@ class DemoDataSource {
       ],
     };
   }
+
+  // ------------------------------------------------------------------
+  // Item Transfer
+  // ------------------------------------------------------------------
+
+  /// What's physically in [binCode] right now, per the shared bin
+  /// registry (see constructor doc). An unrecognized or empty bin
+  /// resolves to `items: []` — a normal response, not an error, since the
+  /// operator scanning an unexpectedly-empty bin is a real floor scenario
+  /// worth surfacing calmly rather than throwing.
+  async getTransferSourceBin(binCode) {
+    const normalized = String(binCode || '').trim().toUpperCase();
+    const bin = this._binRegistry[normalized];
+    if (!bin || !bin.occupantSku || bin.currentQty <= 0) {
+      return { binCode: normalized, items: [] };
+    }
+    return {
+      binCode: normalized,
+      items: [
+        {
+          sku: bin.occupantSku,
+          description: this._itemDescriptions[bin.occupantSku] || bin.occupantSku,
+          availableQty: bin.currentQty,
+        },
+      ],
+    };
+  }
+
+  /// A destination bin is accepted only if it has enough free capacity
+  /// AND either holds nothing yet or already holds the same sku — mixing
+  /// two different skus in one physical bin isn't something this
+  /// warehouse's bins support, matching [suggestPutAwayBin]'s registry
+  /// model.
+  async validateTransferBin(payload) {
+    const { destinationBinCode, sku, qty } = payload || {};
+    const normalized = String(destinationBinCode).trim().toUpperCase();
+    const bin = this._binRegistry[normalized];
+
+    if (!bin) {
+      return { accepted: false, reason: `Bin "${normalized}" is not recognized.` };
+    }
+    if (bin.occupantSku && bin.occupantSku !== sku) {
+      return { accepted: false, reason: `Bin ${normalized} already holds a different item (${bin.occupantSku}).` };
+    }
+    if (bin.capacity - bin.currentQty < qty) {
+      return { accepted: false, reason: `Bin ${normalized} only has ${bin.capacity - bin.currentQty} unit(s) of free capacity.` };
+    }
+    return { accepted: true };
+  }
+
+  /// Records the actual movement: decrements the source bin, increments
+  /// the destination — a real change to on-hand quantity, not a flag.
+  /// Both bins must already exist in the registry (the operator can only
+  /// have gotten here by successfully scanning a source with stock and a
+  /// validated destination), so a missing bin here indicates a genuine
+  /// data problem worth a 400 rather than silently no-opping.
+  async confirmTransfer(payload) {
+    const { sourceBinCode, destinationBinCode, sku, qty } = payload;
+    const sourceCode = String(sourceBinCode).trim().toUpperCase();
+    const destCode = String(destinationBinCode).trim().toUpperCase();
+
+    const source = this._binRegistry[sourceCode];
+    const destination = this._binRegistry[destCode];
+
+    if (!source || source.occupantSku !== sku || source.currentQty < qty) {
+      throw ApiError.badRequest(`Source bin "${sourceCode}" does not have ${qty} unit(s) of "${sku}" available.`);
+    }
+    if (!destination) {
+      throw ApiError.badRequest(`Destination bin "${destCode}" is not recognized.`);
+    }
+    if (destination.occupantSku && destination.occupantSku !== sku) {
+      throw ApiError.conflict(`Destination bin ${destCode} now holds a different item — re-validate before retrying.`);
+    }
+    if (destination.capacity - destination.currentQty < qty) {
+      throw ApiError.conflict(`Destination bin ${destCode} no longer has enough free capacity — re-validate before retrying.`);
+    }
+
+    source.currentQty -= qty;
+    if (source.currentQty <= 0) {
+      source.currentQty = 0;
+      source.occupantSku = null;
+    }
+
+    destination.currentQty += qty;
+    if (!destination.occupantSku) destination.occupantSku = sku;
+
+    return { ok: true };
+  }
 }
 
 function stripInternal(doc) {
@@ -284,8 +388,6 @@ function seedPutAwayDocs() {
       docId: 'PA-00125',
       sourceWarehouseReceipt: 'WHR-54323',
       status: 'inProgress',
-      // Where this batch is currently staged, distinct from each item's
-      // own `location` below (its PUT AWAY TO destination bin).
       receivedFromLocation: 'DOCK-1',
       items: [
         { sku: 'SKU-1001', description: '12oz Organic Coffee Beans', qty: 50, location: 'RCV-A1' },
@@ -342,13 +444,6 @@ function seedPickDocs() {
       isHighPriority: false,
       items: [{ sku: '44120-QQ', description: 'Canvas Tote Bag', qty: 2, location: 'B-09-02' }],
     },
-    // Deliberately larger/messier than the others, for testing the
-    // walk-order Pick flow properly: 5 bins, 7 line items, 40 units total.
-    // SKU-BOLT-M6 is split across THREE separate bins (A-05-01, A-05-02,
-    // C-02-01) — the split-sku-across-bins scenario. A-05-01 and B-03-04
-    // each carry two different skus in one bin — the multiple-items-in-
-    // one-bin scenario. Walk order should come out sorted by bin address:
-    // A-05-01, A-05-02, B-01-01, B-03-04, C-02-01.
     'WH-PICK-00126': {
       docId: 'WH-PICK-00126',
       shipmentRef: 'WHS-10571',

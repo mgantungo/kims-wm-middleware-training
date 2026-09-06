@@ -14,7 +14,8 @@ const ApiError = require('../../utils/apiError');
  *   - Each method below calls the corresponding Business Central OData v4 /
  *     API v2.0 endpoint (e.g. warehouse activity lines for put-away/pick,
  *     sales shipment lines for gate pass, item ledger entries for
- *     inquiries) and maps the response into the same JSON shape the demo
+ *     inquiries, warehouse internal movement journal lines for Item
+ *     Transfer) and maps the response into the same JSON shape the demo
  *     adapter already returns — that mapping is the actual Phase 2 work.
  *   - Token acquisition/caching belongs in its own bcAuthClient.js
  *     alongside this file, not inlined here.
@@ -47,6 +48,13 @@ class BusinessCentralDataSource {
   async searchItem() { return this._notImplemented('searchItem'); }
   async searchBin() { return this._notImplemented('searchBin'); }
   async trackPallet() { return this._notImplemented('trackPallet'); }
+
+  // Item Transfer — expected to map onto Business Central's warehouse
+  // internal movement journal (or item journal, depending on how Klan's BC
+  // environment is configured for non-directed pick/put-away warehouses).
+  async getTransferSourceBin() { return this._notImplemented('getTransferSourceBin'); }
+  async validateTransferBin() { return this._notImplemented('validateTransferBin'); }
+  async confirmTransfer() { return this._notImplemented('confirmTransfer'); }
 }
 
 module.exports = BusinessCentralDataSource;
