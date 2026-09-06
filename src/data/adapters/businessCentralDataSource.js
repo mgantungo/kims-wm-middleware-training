@@ -55,6 +55,13 @@ class BusinessCentralDataSource {
   async getTransferSourceBin() { return this._notImplemented('getTransferSourceBin'); }
   async validateTransferBin() { return this._notImplemented('validateTransferBin'); }
   async confirmTransfer() { return this._notImplemented('confirmTransfer'); }
+
+  // Quarantine — expected to map onto the same BC movement mechanism as
+  // Item Transfer, plus whatever field BC uses to record a quarantine
+  // reason (a dimension on the journal line, most likely).
+  async getQuarantineSourceBin() { return this._notImplemented('getQuarantineSourceBin'); }
+  async validateQuarantineBin() { return this._notImplemented('validateQuarantineBin'); }
+  async confirmQuarantine() { return this._notImplemented('confirmQuarantine'); }
 }
 
 module.exports = BusinessCentralDataSource;

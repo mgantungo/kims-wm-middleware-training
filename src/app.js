@@ -20,6 +20,7 @@ const gatePassRoutes = require('./modules/gatePass/gatePass.routes');
 const inquiryRoutes = require('./modules/inquiry/inquiry.routes');
 const scanLoggingRoutes = require('./modules/scanLogging/scanLogging.routes');
 const transferRoutes = require('./modules/transfer/transfer.routes');
+const quarantineRoutes = require('./modules/quarantine/quarantine.routes');
 
 const app = express();
 
@@ -67,6 +68,7 @@ app.use('/gate-pass', requireAuth, gatePassRoutes);
 app.use('/inquiry', requireAuth, inquiryRoutes);
 app.use('/scan-logging', requireAuth, scanLoggingRoutes);
 app.use('/transfer', requireAuth, transferRoutes);
+app.use('/quarantine', requireAuth, quarantineRoutes);
 
 app.use(notFoundHandler);
 app.use(errorHandler);

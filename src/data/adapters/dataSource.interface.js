@@ -80,5 +80,28 @@
  *   destination's by [qty] — this is a real stock movement, not a flag.
  *   reasonCode is one of 'repair' | 'consolidation' | 'other' | null
  *   (optional — Transfer's reason is not required, unlike Quarantine's).
+ *
+ * -- Quarantine ----------------------------------------------------------
+ * getQuarantineSourceBin(binCode)       -> { binCode: string, items: [{ sku, description, availableQty }] }
+ *   Identical shape and semantics to getTransferSourceBin — same ad-hoc
+ *   "scan whatever bin you're at" entry point, same shared bin registry.
+ * validateQuarantineBin(payload)        -> { accepted: boolean, reason?: string }
+ *   payload: { sourceBinCode, destinationBinCode, sku, qty }
+ *   Live, blocking, never outbox-queued. Rejects unless the destination is
+ *   a bin FLAGGED as a quarantine zone (not just any bin with capacity —
+ *   this is the one validation difference from validateTransferBin) with
+ *   enough free capacity and no conflicting occupant sku.
+ * confirmQuarantine(payload)            -> { ok: true }
+ *   payload: { sourceBinCode, destinationBinCode, sku, qty, reasonCode,
+ *   reasonNote?, scanLog? }
+ *   UNLIKE confirmTransfer, this is called and awaited LIVE by the app —
+ *   never replayed from the client's offline outbox. A quarantine confirm
+ *   is a real stock movement (decrements source, increments the
+ *   quarantine bin) that the operator is standing there waiting on
+ *   Business Central to accept; queuing it for later sync could tell the
+ *   floor "done" while the item is still shown in its original bin.
+ *   reasonCode is REQUIRED: one of 'damaged' | 'expired' | 'qualityHold' |
+ *   'other' (reasonNote required when 'other'), unlike Transfer's
+ *   optional reason.
  */
 module.exports = {};

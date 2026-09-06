@@ -55,6 +55,15 @@ class DemoDataSource {
       'B-03-04': { capacity: 30, occupantSku: 'SKU-CLIP-RET', currentQty: 9 },
       'C-02-01': { capacity: 40, occupantSku: null, currentQty: 0 },
       'REPAIR-STAGING': { capacity: 200, occupantSku: null, currentQty: 0 },
+      // Quarantine zones — flagged with isQuarantineZone so
+      // validateQuarantineBin rejects any ordinary storage bin even if it
+      // has free capacity. A regular floor bin is never a valid
+      // quarantine destination, and a quarantine bin is never a valid
+      // Item Transfer destination (validateTransferBin doesn't check this
+      // flag, so it would technically allow it today — worth a follow-up
+      // guard if the floor crew ever needs that hard-blocked too).
+      'QZ-DAMAGED': { capacity: 100, occupantSku: null, currentQty: 0, isQuarantineZone: true },
+      'QZ-HOLD': { capacity: 60, occupantSku: null, currentQty: 0, isQuarantineZone: true },
     };
 
     // Item descriptions, for bins whose sku doesn't already come attached
@@ -372,6 +381,87 @@ class DemoDataSource {
 
     destination.currentQty += qty;
     if (!destination.occupantSku) destination.occupantSku = sku;
+
+    return { ok: true };
+  }
+
+  // ------------------------------------------------------------------
+  // Quarantine
+  // ------------------------------------------------------------------
+
+  /// Identical semantics to getTransferSourceBin — same shared registry,
+  /// same "empty/unrecognized bin is a normal response" rule.
+  async getQuarantineSourceBin(binCode) {
+    return this.getTransferSourceBin(binCode);
+  }
+
+  /// Only difference from validateTransferBin: the destination MUST be
+  /// flagged isQuarantineZone. An ordinary storage bin is rejected even
+  /// if it has plenty of free capacity — damaged stock cannot land in a
+  /// normal picking bin by mistake.
+  async validateQuarantineBin(payload) {
+    const { destinationBinCode, sku, qty } = payload || {};
+    const normalized = String(destinationBinCode).trim().toUpperCase();
+    const bin = this._binRegistry[normalized];
+
+    if (!bin) {
+      return { accepted: false, reason: `Bin "${normalized}" is not recognized.` };
+    }
+    if (!bin.isQuarantineZone) {
+      return { accepted: false, reason: `${normalized} is not a quarantine zone. Scan a designated quarantine bin.` };
+    }
+    if (bin.occupantSku && bin.occupantSku !== sku) {
+      return { accepted: false, reason: `Bin ${normalized} already holds a different item (${bin.occupantSku}).` };
+    }
+    if (bin.capacity - bin.currentQty < qty) {
+      return { accepted: false, reason: `Bin ${normalized} only has ${bin.capacity - bin.currentQty} unit(s) of free capacity.` };
+    }
+    return { accepted: true };
+  }
+
+  /// Real stock movement, same mechanics as confirmTransfer — but this
+  /// method is called and awaited LIVE by the app (see
+  /// quarantine.routes.js doc comment), never replayed from an offline
+  /// outbox. Also re-validates the destination is still a quarantine
+  /// zone server-side, in case the client's copy of the registry is stale
+  /// (defense in depth — the same reasoning as confirmTransfer's
+  /// re-check of capacity/occupant).
+  async confirmQuarantine(payload) {
+    const { sourceBinCode, destinationBinCode, sku, qty, reasonCode } = payload;
+    const sourceCode = String(sourceBinCode).trim().toUpperCase();
+    const destCode = String(destinationBinCode).trim().toUpperCase();
+
+    const source = this._binRegistry[sourceCode];
+    const destination = this._binRegistry[destCode];
+
+    if (!source || source.occupantSku !== sku || source.currentQty < qty) {
+      throw ApiError.badRequest(`Source bin "${sourceCode}" does not have ${qty} unit(s) of "${sku}" available.`);
+    }
+    if (!destination || !destination.isQuarantineZone) {
+      throw ApiError.badRequest(`"${destCode}" is not a recognized quarantine zone.`);
+    }
+    if (destination.occupantSku && destination.occupantSku !== sku) {
+      throw ApiError.conflict(`Quarantine bin ${destCode} now holds a different item — re-validate before retrying.`);
+    }
+    if (destination.capacity - destination.currentQty < qty) {
+      throw ApiError.conflict(`Quarantine bin ${destCode} no longer has enough free capacity — re-validate before retrying.`);
+    }
+
+    source.currentQty -= qty;
+    if (source.currentQty <= 0) {
+      source.currentQty = 0;
+      source.occupantSku = null;
+    }
+
+    destination.currentQty += qty;
+    if (!destination.occupantSku) destination.occupantSku = sku;
+
+    // In a real BC integration this is also where a quarantine reason
+    // code would typically get logged against the movement journal line
+    // (reasonCode is accepted and validated by the controller but not
+    // otherwise used by this in-memory adapter — nothing here persists
+    // across a restart anyway).
+    void reasonCode;
 
     return { ok: true };
   }
