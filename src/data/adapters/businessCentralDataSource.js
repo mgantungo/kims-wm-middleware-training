@@ -1,3 +1,4 @@
+// src/data/adapters/businessCentralDataSource.js
 const ApiError = require('../../utils/apiError');
 
 /**
@@ -49,19 +50,27 @@ class BusinessCentralDataSource {
   async searchBin() { return this._notImplemented('searchBin'); }
   async trackPallet() { return this._notImplemented('trackPallet'); }
 
-  // Item Transfer — expected to map onto Business Central's warehouse
-  // internal movement journal (or item journal, depending on how Klan's BC
-  // environment is configured for non-directed pick/put-away warehouses).
-  async getTransferSourceBin() { return this._notImplemented('getTransferSourceBin'); }
-  async validateTransferBin() { return this._notImplemented('validateTransferBin'); }
-  async confirmTransfer() { return this._notImplemented('confirmTransfer'); }
+  // Item Transfer — document-driven: expected to map onto Business
+  // Central's warehouse internal movement journal (or item journal,
+  // depending on how Klan's BC environment is configured), where the
+  // document itself (which bins, which skus, which quantities) comes from
+  // a BC-side transfer/movement request that's already been approved
+  // before it reaches this adapter — the operator executes it, never
+  // decides it.
+  async getTransferDocuments() { return this._notImplemented('getTransferDocuments'); }
+  async getTransferDocument() { return this._notImplemented('getTransferDocument'); }
+  async validateTransferSplitBin() { return this._notImplemented('validateTransferSplitBin'); }
+  async suggestTransferSplitBin() { return this._notImplemented('suggestTransferSplitBin'); }
+  async confirmTransferItem() { return this._notImplemented('confirmTransferItem'); }
 
-  // Quarantine — expected to map onto the same BC movement mechanism as
-  // Item Transfer, plus whatever field BC uses to record a quarantine
-  // reason (a dimension on the journal line, most likely).
-  async getQuarantineSourceBin() { return this._notImplemented('getQuarantineSourceBin'); }
-  async validateQuarantineBin() { return this._notImplemented('validateQuarantineBin'); }
-  async confirmQuarantine() { return this._notImplemented('confirmQuarantine'); }
+  // Quarantine — document-driven, same BC movement mechanism as Item
+  // Transfer, plus whatever field BC uses to record a quarantine reason
+  // on the line.
+  async getQuarantineDocuments() { return this._notImplemented('getQuarantineDocuments'); }
+  async getQuarantineDocument() { return this._notImplemented('getQuarantineDocument'); }
+  async validateQuarantineSplitBin() { return this._notImplemented('validateQuarantineSplitBin'); }
+  async suggestQuarantineSplitBin() { return this._notImplemented('suggestQuarantineSplitBin'); }
+  async confirmQuarantineItem() { return this._notImplemented('confirmQuarantineItem'); }
 }
 
 module.exports = BusinessCentralDataSource;

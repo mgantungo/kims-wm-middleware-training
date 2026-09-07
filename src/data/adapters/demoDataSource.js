@@ -1,3 +1,4 @@
+// src/data/adapters/demoDataSource.js
 const ApiError = require('../../utils/apiError');
 
 /**
@@ -16,6 +17,8 @@ class DemoDataSource {
     this._putAwayDocs = seedPutAwayDocs();
     this._pickDocs = seedPickDocs();
     this._verifyPicks = seedVerifyPicks();
+    this._transferDocs = seedTransferDocs();
+    this._quarantineDocs = seedQuarantineDocs();
     this._gatePassSeq = 800;
 
     // Split-bin validation (put-away short/split flow, operator-scanned
@@ -56,30 +59,16 @@ class DemoDataSource {
       'C-02-01': { capacity: 40, occupantSku: null, currentQty: 0 },
       'REPAIR-STAGING': { capacity: 200, occupantSku: null, currentQty: 0 },
       // Quarantine zones — flagged with isQuarantineZone so
-      // validateQuarantineBin rejects any ordinary storage bin even if it
-      // has free capacity. A regular floor bin is never a valid
-      // quarantine destination, and a quarantine bin is never a valid
-      // Item Transfer destination (validateTransferBin doesn't check this
-      // flag, so it would technically allow it today — worth a follow-up
-      // guard if the floor crew ever needs that hard-blocked too).
+      // validateQuarantineSplitBin (and suggestQuarantineSplitBin) reject
+      // any ordinary storage bin even if it has free capacity. A regular
+      // floor bin is never a valid quarantine destination, and a
+      // quarantine bin is never a valid Item Transfer split destination
+      // either — validateTransferSplitBin/suggestTransferSplitBin don't
+      // filter on this flag, so a quarantine bin would technically be
+      // offered as a transfer split target today if it had free capacity
+      // — worth a follow-up guard if that needs to be hard-blocked too.
       'QZ-DAMAGED': { capacity: 100, occupantSku: null, currentQty: 0, isQuarantineZone: true },
       'QZ-HOLD': { capacity: 60, occupantSku: null, currentQty: 0, isQuarantineZone: true },
-    };
-
-    // Item descriptions, for bins whose sku doesn't already come attached
-    // to one via a put-away/pick document line. Transfer's source-bin
-    // lookup needs a human-readable description even for a bin that was
-    // only ever populated by seed data or a prior transfer.
-    this._itemDescriptions = {
-      'SKU-1001': '12oz Organic Coffee Beans',
-      'SKU-1002': 'Stainless Steel Mixing Bowl',
-      'SKU-2001': 'Cotton Packing Blankets',
-      'SKU-3001': 'Galvanized Steel Brackets',
-      'SKU-BOLT-M6': 'Hex Bolt, M6 x 20mm',
-      'SKU-WASH-M6': 'Flat Washer, M6',
-      'SKU-NAIL-2IN': 'Finish Nail, 2 inch',
-      'SKU-CLIP-RET': 'Retaining Clip',
-      'SKU-SCREW-M4': 'Machine Screw, M4',
     };
   }
 
@@ -148,7 +137,17 @@ class DemoDataSource {
     if (!docId || !sku || qty == null) {
       throw ApiError.badRequest('docId, sku, and qty are required.');
     }
+    return this._suggestBinForSku(sku, qty, excludeBinCode);
+  }
 
+  /// Shared bin-suggestion logic behind suggestPutAwayBin AND
+  /// suggestTransferSplitBin — both ask "find/reserve a bin with room for
+  /// [qty] units of [sku]", identical selection rules (prefer topping up
+  /// existing stock, else best-fit among empty bins), just triggered from
+  /// different flows. Reserves capacity immediately in the registry (see
+  /// suggestPutAwayBin's original doc for why) rather than waiting for
+  /// the eventual confirm call.
+  _suggestBinForSku(sku, qty, excludeBinCode) {
     const excluded = excludeBinCode ? String(excludeBinCode).trim().toUpperCase() : null;
     const entries = Object.entries(this._binRegistry).filter(([code]) => code !== excluded);
 
@@ -298,40 +297,77 @@ class DemoDataSource {
   }
 
   // ------------------------------------------------------------------
-  // Item Transfer
+  // Item Transfer — document-driven. Business Central decides both the
+  // source and destination bin for every line before the document is
+  // assigned; the app's job is to have the operator execute and confirm
+  // via scanning, not to judge or choose bins live. This mirrors Put
+  // Away's shape almost exactly (see getPutAwayDocuments/confirmPutAwayItem
+  // above) with sourceBinCode added per line.
   // ------------------------------------------------------------------
-
-  /// What's physically in [binCode] right now, per the shared bin
-  /// registry (see constructor doc). An unrecognized or empty bin
-  /// resolves to `items: []` — a normal response, not an error, since the
-  /// operator scanning an unexpectedly-empty bin is a real floor scenario
-  /// worth surfacing calmly rather than throwing.
-  async getTransferSourceBin(binCode) {
-    const normalized = String(binCode || '').trim().toUpperCase();
-    const bin = this._binRegistry[normalized];
-    if (!bin || !bin.occupantSku || bin.currentQty <= 0) {
-      return { binCode: normalized, items: [] };
-    }
-    return {
-      binCode: normalized,
-      items: [
-        {
-          sku: bin.occupantSku,
-          description: this._itemDescriptions[bin.occupantSku] || bin.occupantSku,
-          availableQty: bin.currentQty,
-        },
-      ],
-    };
+  async getTransferDocuments() {
+    return { documents: Object.values(this._transferDocs).map(stripInternal) };
   }
 
-  /// A destination bin is accepted only if it has enough free capacity
-  /// AND either holds nothing yet or already holds the same sku — mixing
-  /// two different skus in one physical bin isn't something this
-  /// warehouse's bins support, matching [suggestPutAwayBin]'s registry
-  /// model.
-  async validateTransferBin(payload) {
-    const { destinationBinCode, sku, qty } = payload || {};
-    const normalized = String(destinationBinCode).trim().toUpperCase();
+  async getTransferDocument(docId) {
+    const doc = this._transferDocs[docId];
+    if (!doc) throw ApiError.notFound(`Transfer document "${docId}" not found.`);
+    return stripInternal(doc);
+  }
+
+  /// Records one confirmed line movement. Still updates the shared bin
+  /// registry (decrement source, increment destination) so Quarantine's
+  /// ad-hoc bin lookups and Put Away's suggestPutAwayBin see a
+  /// floor-consistent picture — but unlike the old ad-hoc design, this is
+  /// bookkeeping AFTER the fact, not a live capacity check gating the
+  /// confirm. Business Central already decided this movement was valid
+  /// when the document was created.
+  async confirmTransferItem(payload) {
+    const { docId, sku, sourceBinCode, destinationBinCode, qty, scanLog } = payload;
+    const doc = this._transferDocs[docId];
+    if (!doc) throw ApiError.notFound(`Transfer document "${docId}" not found.`);
+
+    // Match by (sku, sourceBinCode) only — NOT destinationBinCode. A
+    // confirm's destination is either the originally-assigned one, or a
+    // live-approved split replacement (see validateTransferSplitBin/
+    // suggestTransferSplitBin) that was never part of the original plan.
+    // Requiring an exact destination match here would reject every
+    // legitimate split-remainder confirm.
+    const line = doc.items.find((i) => i.sku === sku && i.sourceBinCode === sourceBinCode);
+    if (!line) throw ApiError.badRequest(`Line (${sku} from ${sourceBinCode}) is not part of document "${docId}".`);
+
+    // Accumulates rather than sets, so a line split across two confirm
+    // calls (settled at the original destination + remainder at a new
+    // one) is correctly tracked as one line reaching its full qty in
+    // two steps, not two separate half-satisfied lines.
+    doc._confirmedQty = doc._confirmedQty || {};
+    const key = `${sku}|${sourceBinCode}`;
+    doc._confirmedQty[key] = (doc._confirmedQty[key] || 0) + qty;
+
+    doc._scanLogs = doc._scanLogs || {};
+    if (Array.isArray(scanLog)) doc._scanLogs[key] = [...(doc._scanLogs[key] || []), ...scanLog];
+
+    const allLinesDone = doc.items.every((i) => (doc._confirmedQty[`${i.sku}|${i.sourceBinCode}`] || 0) >= i.qty);
+    doc.status = allLinesDone ? 'complete' : 'inProgress';
+
+    const source = this._binRegistry[sourceBinCode];
+    const destination = this._binRegistry[destinationBinCode];
+    if (source && source.occupantSku === sku) {
+      source.currentQty = Math.max(0, source.currentQty - qty);
+      if (source.currentQty === 0) source.occupantSku = null;
+    }
+    if (destination) {
+      destination.currentQty += qty;
+      if (!destination.occupantSku) destination.occupantSku = sku;
+    }
+
+    return { ok: true };
+  }
+
+  /// SPLIT-ONLY — see transfer.routes.js doc comment. Never used to
+  /// decide a line's original destination.
+  async validateTransferSplitBin(payload) {
+    const { binCode, sku, qty } = payload || {};
+    const normalized = String(binCode).trim().toUpperCase();
     const bin = this._binRegistry[normalized];
 
     if (!bin) {
@@ -346,62 +382,74 @@ class DemoDataSource {
     return { accepted: true };
   }
 
-  /// Records the actual movement: decrements the source bin, increments
-  /// the destination — a real change to on-hand quantity, not a flag.
-  /// Both bins must already exist in the registry (the operator can only
-  /// have gotten here by successfully scanning a source with stock and a
-  /// validated destination), so a missing bin here indicates a genuine
-  /// data problem worth a 400 rather than silently no-opping.
-  async confirmTransfer(payload) {
-    const { sourceBinCode, destinationBinCode, sku, qty } = payload;
-    const sourceCode = String(sourceBinCode).trim().toUpperCase();
-    const destCode = String(destinationBinCode).trim().toUpperCase();
+  /// SPLIT-ONLY — reuses the exact same selection logic as
+  /// suggestPutAwayBin via [_suggestBinForSku].
+  async suggestTransferSplitBin(payload) {
+    const { sku, qty, excludeBinCode } = payload || {};
+    return this._suggestBinForSku(sku, qty, excludeBinCode);
+  }
 
-    const source = this._binRegistry[sourceCode];
-    const destination = this._binRegistry[destCode];
+  // ------------------------------------------------------------------
+  // Quarantine — document-driven, per Klan's control requirement: same
+  // pattern as Item Transfer (Business Central decides source bin, item,
+  // qty, quarantine destination, AND reason before the document is
+  // assigned), including the same split-only live escape hatch for when
+  // the assigned quarantine bin turns out short of room on arrival.
+  // ------------------------------------------------------------------
+  async getQuarantineDocuments() {
+    return { documents: Object.values(this._quarantineDocs).map(stripInternal) };
+  }
 
-    if (!source || source.occupantSku !== sku || source.currentQty < qty) {
-      throw ApiError.badRequest(`Source bin "${sourceCode}" does not have ${qty} unit(s) of "${sku}" available.`);
-    }
-    if (!destination) {
-      throw ApiError.badRequest(`Destination bin "${destCode}" is not recognized.`);
-    }
-    if (destination.occupantSku && destination.occupantSku !== sku) {
-      throw ApiError.conflict(`Destination bin ${destCode} now holds a different item — re-validate before retrying.`);
-    }
-    if (destination.capacity - destination.currentQty < qty) {
-      throw ApiError.conflict(`Destination bin ${destCode} no longer has enough free capacity — re-validate before retrying.`);
-    }
+  async getQuarantineDocument(docId) {
+    const doc = this._quarantineDocs[docId];
+    if (!doc) throw ApiError.notFound(`Quarantine document "${docId}" not found.`);
+    return stripInternal(doc);
+  }
 
-    source.currentQty -= qty;
-    if (source.currentQty <= 0) {
-      source.currentQty = 0;
-      source.occupantSku = null;
-    }
+  /// Same accumulate-by-(sku,sourceBinCode) approach as
+  /// confirmTransferItem, for the same reason: a split-remainder confirm
+  /// targets a destination that was never part of the original plan.
+  async confirmQuarantineItem(payload) {
+    const { docId, sku, sourceBinCode, destinationBinCode, qty, scanLog } = payload;
+    const doc = this._quarantineDocs[docId];
+    if (!doc) throw ApiError.notFound(`Quarantine document "${docId}" not found.`);
 
-    destination.currentQty += qty;
-    if (!destination.occupantSku) destination.occupantSku = sku;
+    const line = doc.items.find((i) => i.sku === sku && i.sourceBinCode === sourceBinCode);
+    if (!line) throw ApiError.badRequest(`Line (${sku} from ${sourceBinCode}) is not part of document "${docId}".`);
+
+    doc._confirmedQty = doc._confirmedQty || {};
+    const key = `${sku}|${sourceBinCode}`;
+    doc._confirmedQty[key] = (doc._confirmedQty[key] || 0) + qty;
+
+    doc._scanLogs = doc._scanLogs || {};
+    if (Array.isArray(scanLog)) doc._scanLogs[key] = [...(doc._scanLogs[key] || []), ...scanLog];
+
+    const allLinesDone = doc.items.every((i) => (doc._confirmedQty[`${i.sku}|${i.sourceBinCode}`] || 0) >= i.qty);
+    doc.status = allLinesDone ? 'complete' : 'inProgress';
+
+    const source = this._binRegistry[sourceBinCode];
+    const destination = this._binRegistry[destinationBinCode];
+    if (source && source.occupantSku === sku) {
+      source.currentQty = Math.max(0, source.currentQty - qty);
+      if (source.currentQty === 0) source.occupantSku = null;
+    }
+    if (destination) {
+      destination.currentQty += qty;
+      if (!destination.occupantSku) destination.occupantSku = sku;
+    }
 
     return { ok: true };
   }
 
-  // ------------------------------------------------------------------
-  // Quarantine
-  // ------------------------------------------------------------------
-
-  /// Identical semantics to getTransferSourceBin — same shared registry,
-  /// same "empty/unrecognized bin is a normal response" rule.
-  async getQuarantineSourceBin(binCode) {
-    return this.getTransferSourceBin(binCode);
-  }
-
-  /// Only difference from validateTransferBin: the destination MUST be
-  /// flagged isQuarantineZone. An ordinary storage bin is rejected even
-  /// if it has plenty of free capacity — damaged stock cannot land in a
-  /// normal picking bin by mistake.
-  async validateQuarantineBin(payload) {
-    const { destinationBinCode, sku, qty } = payload || {};
-    const normalized = String(destinationBinCode).trim().toUpperCase();
+  /// SPLIT-ONLY — the operator has already arrived at the Business
+  /// Central-assigned quarantine bin and found it physically short.
+  /// UNLIKE Transfer's split (which can land anywhere with capacity),
+  /// the replacement here MUST also be flagged isQuarantineZone — damaged
+  /// stock cannot land in a normal picking bin just because that's what
+  /// had room.
+  async validateQuarantineSplitBin(payload) {
+    const { binCode, sku, qty } = payload || {};
+    const normalized = String(binCode).trim().toUpperCase();
     const bin = this._binRegistry[normalized];
 
     if (!bin) {
@@ -419,56 +467,44 @@ class DemoDataSource {
     return { accepted: true };
   }
 
-  /// Real stock movement, same mechanics as confirmTransfer — but this
-  /// method is called and awaited LIVE by the app (see
-  /// quarantine.routes.js doc comment), never replayed from an offline
-  /// outbox. Also re-validates the destination is still a quarantine
-  /// zone server-side, in case the client's copy of the registry is stale
-  /// (defense in depth — the same reasoning as confirmTransfer's
-  /// re-check of capacity/occupant).
-  async confirmQuarantine(payload) {
-    const { sourceBinCode, destinationBinCode, sku, qty, reasonCode } = payload;
-    const sourceCode = String(sourceBinCode).trim().toUpperCase();
-    const destCode = String(destinationBinCode).trim().toUpperCase();
+  /// SPLIT-ONLY auto-assign — same [_suggestBinForSku] selection logic as
+  /// Put Away/Transfer, but restricted to bins flagged isQuarantineZone.
+  async suggestQuarantineSplitBin(payload) {
+    const { sku, qty, excludeBinCode } = payload || {};
+    const excluded = excludeBinCode ? String(excludeBinCode).trim().toUpperCase() : null;
+    const entries = Object.entries(this._binRegistry).filter(([code, bin]) => code !== excluded && bin.isQuarantineZone);
 
-    const source = this._binRegistry[sourceCode];
-    const destination = this._binRegistry[destCode];
+    const topUpCandidates = entries
+      .filter(([, bin]) => bin.occupantSku === sku && bin.capacity - bin.currentQty >= qty)
+      .sort((a, b) => b[1].currentQty - a[1].currentQty);
 
-    if (!source || source.occupantSku !== sku || source.currentQty < qty) {
-      throw ApiError.badRequest(`Source bin "${sourceCode}" does not have ${qty} unit(s) of "${sku}" available.`);
-    }
-    if (!destination || !destination.isQuarantineZone) {
-      throw ApiError.badRequest(`"${destCode}" is not a recognized quarantine zone.`);
-    }
-    if (destination.occupantSku && destination.occupantSku !== sku) {
-      throw ApiError.conflict(`Quarantine bin ${destCode} now holds a different item — re-validate before retrying.`);
-    }
-    if (destination.capacity - destination.currentQty < qty) {
-      throw ApiError.conflict(`Quarantine bin ${destCode} no longer has enough free capacity — re-validate before retrying.`);
+    const chosen = topUpCandidates.length > 0
+      ? topUpCandidates[0]
+      : entries.filter(([, bin]) => !bin.occupantSku && bin.capacity >= qty).sort((a, b) => a[1].capacity - b[1].capacity)[0];
+
+    if (!chosen) {
+      return { available: false, reason: `No quarantine zone with ${qty} units of free capacity was found.` };
     }
 
-    source.currentQty -= qty;
-    if (source.currentQty <= 0) {
-      source.currentQty = 0;
-      source.occupantSku = null;
-    }
+    const [binCode, bin] = chosen;
+    const isTopUp = bin.occupantSku === sku;
+    const currentQtyBeforeReservation = bin.currentQty;
 
-    destination.currentQty += qty;
-    if (!destination.occupantSku) destination.occupantSku = sku;
+    bin.currentQty += qty;
+    if (!bin.occupantSku) bin.occupantSku = sku;
 
-    // In a real BC integration this is also where a quarantine reason
-    // code would typically get logged against the movement journal line
-    // (reasonCode is accepted and validated by the controller but not
-    // otherwise used by this in-memory adapter — nothing here persists
-    // across a restart anyway).
-    void reasonCode;
-
-    return { ok: true };
+    return {
+      available: true,
+      binCode,
+      isTopUp,
+      currentQty: currentQtyBeforeReservation,
+      capacityRemaining: bin.capacity - bin.currentQty,
+    };
   }
 }
 
 function stripInternal(doc) {
-  const { _confirmed, _scanLogs, ...rest } = doc;
+  const { _confirmed, _confirmedQty, _scanLogs, ...rest } = doc;
   return rest;
 }
 
@@ -590,6 +626,67 @@ function seedVerifyPicks() {
       orderId: '12347',
       customer: 'Metro Distribution',
       items: [{ sku: 'CBL-009-E', name: 'Ethernet Cable 10m', location: 'Aisle 6, Shelf 2', expected: 6, verified: 0, status: 'pending', requiresPackaging: true }],
+    },
+  };
+}
+
+function seedTransferDocs() {
+  return {
+    'TR-00301': {
+      docId: 'TR-00301',
+      status: 'assigned',
+      // Many-to-one: two small bins of the SAME sku consolidating into
+      // one bigger, currently-empty bin — both lines share
+      // destinationBinCode. Matches "multiple small bins to one big bin"
+      // from the product brief.
+      items: [
+        { sku: 'SKU-BOLT-M6', description: 'Hex Bolt, M6 x 20mm', qty: 18, sourceBinCode: 'A-05-01', destinationBinCode: 'C-02-01' },
+        { sku: 'SKU-BOLT-M6', description: 'Hex Bolt, M6 x 20mm', qty: 6, sourceBinCode: 'A-05-02', destinationBinCode: 'C-02-01' },
+      ],
+    },
+    'TR-00302': {
+      docId: 'TR-00302',
+      status: 'assigned',
+      // One-to-many split: one source bin, one sku, split across two
+      // different (empty) destinations with different quantities —
+      // together consuming all 24 units B-01-01 holds.
+      items: [
+        { sku: 'SKU-NAIL-2IN', description: 'Finish Nail, 2 inch', qty: 15, sourceBinCode: 'B-01-01', destinationBinCode: 'RCV-C2' },
+        { sku: 'SKU-NAIL-2IN', description: 'Finish Nail, 2 inch', qty: 9, sourceBinCode: 'B-01-01', destinationBinCode: 'REPAIR-STAGING' },
+      ],
+    },
+    'TR-00303': {
+      docId: 'TR-00303',
+      status: 'assigned',
+      // Straightforward one-to-one, repair-driven move. Note: this demo
+      // adapter doesn't enforce single-sku-per-destination bookkeeping
+      // across Transfer documents the way it does for Put Away/Quarantine
+      // suggestions — REPAIR-STAGING can legitimately receive several
+      // different skus from several different transfers, which is a
+      // real staging-area pattern, not a bug worth guarding against here.
+      items: [{ sku: 'SKU-CLIP-RET', description: 'Retaining Clip', qty: 9, sourceBinCode: 'B-03-04', destinationBinCode: 'REPAIR-STAGING' }],
+    },
+  };
+}
+
+function seedQuarantineDocs() {
+  return {
+    'QT-00501': {
+      docId: 'QT-00501',
+      status: 'assigned',
+      // Reason arrives from BC on the line now (not chosen by the
+      // operator) — matches the same control requirement driving
+      // Transfer's redesign.
+      items: [
+        { sku: 'SKU-BOLT-M6', description: 'Hex Bolt, M6 x 20mm', qty: 4, sourceBinCode: 'A-05-01', destinationBinCode: 'QZ-DAMAGED', reasonCode: 'damaged', reasonNote: null },
+      ],
+    },
+    'QT-00502': {
+      docId: 'QT-00502',
+      status: 'assigned',
+      items: [
+        { sku: 'SKU-CLIP-RET', description: 'Retaining Clip', qty: 9, sourceBinCode: 'B-03-04', destinationBinCode: 'QZ-HOLD', reasonCode: 'qualityHold', reasonNote: null },
+      ],
     },
   };
 }

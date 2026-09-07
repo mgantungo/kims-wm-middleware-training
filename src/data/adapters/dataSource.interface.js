@@ -1,3 +1,4 @@
+// src/data/dataSource.interface.js
 /**
  * @fileoverview Contract every data source adapter must satisfy.
  *
@@ -11,6 +12,46 @@
  *
  * Method  -> Returns (shape matches the Flutter app's model fromJson exactly)
  * ------------------------------------------------------------------------
+ * -- Item Transfer (document-driven, per Klan's process: Business Central
+ * decides which bins move where — the app never lets an operator choose a
+ * destination) ------------------------------------------------------------
+ * getTransferDocuments()                -> { documents: TransferDocument[] }
+ * getTransferDocument(docId)            -> TransferDocument
+ *   TransferDocument: { docId, status, items: TransferLineItem[] }
+ *   TransferLineItem: { sku, description, qty, sourceBinCode,
+ *   destinationBinCode, scannable }. Both bins arrive pre-assigned from
+ *   Business Central — many-to-one (consolidation) is several lines
+ *   sharing one destinationBinCode; one-to-many (split placement) is
+ *   several lines sharing one sourceBinCode+sku with different
+ *   destinationBinCodes and split quantities. The app groups lines into
+ *   "stops" by sourceBinCode (the physical bin the operator walks to),
+ *   exactly the way PutAwayDocument groups by destination location.
+ * validateTransferSplitBin(payload)     -> { accepted: boolean, reason?: string }
+ *   payload: { docId, binCode, sku, qty }
+ *   SPLIT-ONLY — never used to decide a line's original destination
+ *   (that's always pre-assigned by Business Central, see above). This
+ *   exists for the case where the operator physically arrives at the
+ *   assigned destination and finds it short of room: they scan a
+ *   candidate replacement bin for the remainder, and this asks Business
+ *   Central to accept/reject it live — same reasoning as Put Away's
+ *   validatePutAwayBin. accepted: false is a normal response (scan a
+ *   different bin), not an error.
+ * suggestTransferSplitBin(payload)      -> { available: boolean, binCode?, isTopUp?, currentQty?, capacityRemaining?, reason? }
+ *   payload: { docId, sku, qty, excludeBinCode? }
+ *   SPLIT-ONLY, same scope as validateTransferSplitBin but Business
+ *   Central picks the bin itself (the "Auto-Assign" path) rather than
+ *   judging one the operator scanned — identical semantics to
+ *   suggestPutAwayBin, including the isTopUp/currentQty fields.
+ * confirmTransferItem(payload)          -> { ok: true }
+ *   payload: { docId, sku, sourceBinCode, destinationBinCode, qty,
+ *   scanLog? }
+ *   Local-first / outbox-queued on the client, identical convention to
+ *   confirmPutAwayItem. No live validate/suggest-bin calls exist for
+ *   Transfer anymore — since Business Central already decided both bins
+ *   before the document was assigned, the operator's source/destination
+ *   scans are a physical confirmation gate (does the scanned bin match
+ *   what BC said?), not a decision the server needs to approve live.
+ *
  * getPutAwayDocuments()                 -> { documents: PutAwayDocument[] }
  * getPutAwayDocument(docId)             -> PutAwayDocument
  * confirmPutAwayItem(payload)           -> { ok: true }
@@ -59,49 +100,39 @@
  * searchBin(code)                       -> BinInquiryResult
  * trackPallet(palletId)                 -> PalletTrackingResult
  *
- * -- Item Transfer -----------------------------------------------------
- * getTransferSourceBin(binCode)         -> { binCode: string, items: [{ sku, description, availableQty }] }
- *   Ad-hoc entry point: unlike Put Away/Pick, Transfer has no assigned
- *   document to select first. The operator scans whatever bin they're
- *   standing at and this returns what's genuinely there to move. An empty
- *   `items` array is a normal response (empty/unrecognized bin), not an
- *   error.
- * validateTransferBin(payload)          -> { accepted: boolean, reason?: string }
- *   payload: { sourceBinCode, destinationBinCode, sku, qty }
- *   Live, blocking, never outbox-queued — same reasoning as
- *   validatePutAwayBin. Checks the destination has enough free capacity
- *   AND (is empty OR already holds the same sku) — a bin holding a
- *   different sku is always rejected, regardless of capacity.
- * confirmTransfer(payload)              -> { ok: true }
- *   payload: { sourceBinCode, destinationBinCode, sku, qty, reasonCode?,
- *   reasonNote?, scanLog? }
- *   Local-first / outbox-queued on the client, same as confirmPutAwayItem.
- *   Decrements the source bin's on-hand qty and increments the
- *   destination's by [qty] — this is a real stock movement, not a flag.
- *   reasonCode is one of 'repair' | 'consolidation' | 'other' | null
- *   (optional — Transfer's reason is not required, unlike Quarantine's).
- *
- * -- Quarantine ----------------------------------------------------------
- * getQuarantineSourceBin(binCode)       -> { binCode: string, items: [{ sku, description, availableQty }] }
- *   Identical shape and semantics to getTransferSourceBin — same ad-hoc
- *   "scan whatever bin you're at" entry point, same shared bin registry.
- * validateQuarantineBin(payload)        -> { accepted: boolean, reason?: string }
- *   payload: { sourceBinCode, destinationBinCode, sku, qty }
- *   Live, blocking, never outbox-queued. Rejects unless the destination is
- *   a bin FLAGGED as a quarantine zone (not just any bin with capacity —
- *   this is the one validation difference from validateTransferBin) with
- *   enough free capacity and no conflicting occupant sku.
- * confirmQuarantine(payload)            -> { ok: true }
- *   payload: { sourceBinCode, destinationBinCode, sku, qty, reasonCode,
- *   reasonNote?, scanLog? }
- *   UNLIKE confirmTransfer, this is called and awaited LIVE by the app —
- *   never replayed from the client's offline outbox. A quarantine confirm
- *   is a real stock movement (decrements source, increments the
- *   quarantine bin) that the operator is standing there waiting on
- *   Business Central to accept; queuing it for later sync could tell the
- *   floor "done" while the item is still shown in its original bin.
- *   reasonCode is REQUIRED: one of 'damaged' | 'expired' | 'qualityHold' |
- *   'other' (reasonNote required when 'other'), unlike Transfer's
- *   optional reason.
+ * -- Quarantine (document-driven, per Klan's control requirement: same
+ * pattern as Item Transfer above — the plan comes from Business Central,
+ * the operator only executes and confirms via scanning) -------------------
+ * getQuarantineDocuments()              -> { documents: QuarantineDocument[] }
+ * getQuarantineDocument(docId)          -> QuarantineDocument
+ *   QuarantineDocument: { docId, status, items: QuarantineLineItem[] }
+ *   QuarantineLineItem: { sku, description, qty, sourceBinCode,
+ *   destinationBinCode, reasonCode, reasonNote, scannable }. Unlike
+ *   Transfer's optional reason, every quarantine line carries a
+ *   reasonCode decided by Business Central when the document was created
+ *   ('damaged' | 'expired' | 'qualityHold' | 'other', with reasonNote set
+ *   when 'other') — the operator sees it, never chooses it. Lines group
+ *   into stops by sourceBinCode exactly like TransferDocument.
+ * validateQuarantineSplitBin(payload)   -> { accepted: boolean, reason?: string }
+ *   payload: { docId, binCode, sku, qty }
+ *   SPLIT-ONLY, same scope as validateTransferSplitBin: the operator
+ *   arrived at the assigned quarantine bin and found it short, and is
+ *   scanning a candidate replacement. UNLIKE Transfer's split (which can
+ *   land in any bin with capacity), the replacement here must ALSO be
+ *   flagged as a quarantine zone — damaged stock cannot land in an
+ *   ordinary picking bin just because that bin had room.
+ * suggestQuarantineSplitBin(payload)    -> { available: boolean, binCode?, isTopUp?, currentQty?, capacityRemaining?, reason? }
+ *   payload: { docId, sku, qty, excludeBinCode? }
+ *   SPLIT-ONLY auto-assign, restricted to quarantine-zone-flagged bins.
+ * confirmQuarantineItem(payload)        -> { ok: true }
+ *   payload: { docId, sku, sourceBinCode, destinationBinCode, qty,
+ *   scanLog? }
+ *   Local-first / outbox-queued on the client, identical convention to
+ *   confirmTransferItem. The original destination-approval concern that
+ *   made confirm live/blocking in this module's original ad-hoc design no
+ *   longer applies — Business Central approves the quarantine zone when
+ *   the document is created, and any later split-remainder destination is
+ *   already live-approved via validateQuarantineSplitBin/
+ *   suggestQuarantineSplitBin before this is ever called.
  */
 module.exports = {};

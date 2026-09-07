@@ -1,49 +1,47 @@
+// src/modules/quarantine/quarantine.controller.js
 const dataSource = require('../../data/dataSourceFactory');
 const ApiError = require('../../utils/apiError');
 
-const VALID_REASON_CODES = ['damaged', 'expired', 'qualityHold', 'other'];
-
-async function getSourceBin(req, res) {
-  const { binCode } = req.params;
-  if (!binCode) throw ApiError.badRequest('binCode is required.');
-  const result = await dataSource.getQuarantineSourceBin(binCode);
+async function listDocuments(req, res) {
+  const result = await dataSource.getQuarantineDocuments();
   res.json(result);
 }
 
+async function getDocument(req, res) {
+  const doc = await dataSource.getQuarantineDocument(req.params.docId);
+  res.json(doc);
+}
+
 async function validateBin(req, res) {
-  const { sourceBinCode, destinationBinCode, sku, qty } = req.body || {};
-  if (!sourceBinCode || !destinationBinCode || !sku || qty == null) {
-    throw ApiError.badRequest('sourceBinCode, destinationBinCode, sku, and qty are required.');
+  const { docId, binCode, sku, qty } = req.body || {};
+  if (!docId || !binCode || !sku || qty == null) {
+    throw ApiError.badRequest('docId, binCode, sku, and qty are required.');
   }
-  const result = await dataSource.validateQuarantineBin({ sourceBinCode, destinationBinCode, sku, qty });
+  const result = await dataSource.validateQuarantineSplitBin({ docId, binCode, sku, qty });
   res.status(200).json(result);
 }
 
-async function confirmQuarantine(req, res) {
-  const { sourceBinCode, destinationBinCode, sku, qty, reasonCode, reasonNote, scanLog } = req.body || {};
-  if (!sourceBinCode || !destinationBinCode || !sku || qty == null) {
-    throw ApiError.badRequest('sourceBinCode, destinationBinCode, sku, and qty are required.');
+async function suggestBin(req, res) {
+  const { docId, sku, qty, excludeBinCode } = req.body || {};
+  if (!docId || !sku || qty == null) {
+    throw ApiError.badRequest('docId, sku, and qty are required.');
   }
-  // Reason IS required for Quarantine — unlike Item Transfer, where it's
-  // optional. This is the one field-level difference in an otherwise
-  // identical request shape.
-  if (!reasonCode || !VALID_REASON_CODES.includes(reasonCode)) {
-    throw ApiError.badRequest(`reasonCode is required and must be one of: ${VALID_REASON_CODES.join(', ')}.`);
-  }
-  if (reasonCode === 'other' && !reasonNote) {
-    throw ApiError.badRequest('reasonNote is required when reasonCode is "other".');
-  }
+  const result = await dataSource.suggestQuarantineSplitBin({ docId, sku, qty, excludeBinCode });
+  res.status(200).json(result);
+}
 
-  const result = await dataSource.confirmQuarantine({
-    sourceBinCode,
-    destinationBinCode,
-    sku,
-    qty,
-    reasonCode,
-    reasonNote: reasonNote || null,
-    scanLog,
-  });
+async function confirmItem(req, res) {
+  const { docId, sku, sourceBinCode, destinationBinCode, qty, scanLog } = req.body || {};
+  if (!docId || !sku || !sourceBinCode || !destinationBinCode || qty == null) {
+    throw ApiError.badRequest('docId, sku, sourceBinCode, destinationBinCode, and qty are required.');
+  }
+  // Local-first / outbox-queued on the client, same as confirmTransferItem
+  // — Business Central already decided the source bin, destination
+  // quarantine bin, and reason when the document was assigned, so this is
+  // a physical confirmation of a pre-approved movement, not a live
+  // judgment call the server needs to approve in real time.
+  const result = await dataSource.confirmQuarantineItem({ docId, sku, sourceBinCode, destinationBinCode, qty, scanLog });
   res.status(201).json(result);
 }
 
-module.exports = { getSourceBin, validateBin, confirmQuarantine };
+module.exports = { listDocuments, getDocument, validateBin, suggestBin, confirmItem };

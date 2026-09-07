@@ -1,45 +1,51 @@
+// src/modules/transfer/transfer.controller.js
 const dataSource = require('../../data/dataSourceFactory');
 const ApiError = require('../../utils/apiError');
 
-async function getSourceBin(req, res) {
-  const { binCode } = req.params;
-  if (!binCode) throw ApiError.badRequest('binCode is required.');
-  const result = await dataSource.getTransferSourceBin(binCode);
+async function listDocuments(req, res) {
+  const result = await dataSource.getTransferDocuments();
   res.json(result);
 }
 
+async function getDocument(req, res) {
+  const doc = await dataSource.getTransferDocument(req.params.docId);
+  res.json(doc);
+}
+
 async function validateBin(req, res) {
-  const { sourceBinCode, destinationBinCode, sku, qty } = req.body || {};
-  if (!sourceBinCode || !destinationBinCode || !sku || qty == null) {
-    throw ApiError.badRequest('sourceBinCode, destinationBinCode, sku, and qty are required.');
+  const { docId, binCode, sku, qty } = req.body || {};
+  if (!docId || !binCode || !sku || qty == null) {
+    throw ApiError.badRequest('docId, binCode, sku, and qty are required.');
   }
-  if (destinationBinCode.trim().toUpperCase() === sourceBinCode.trim().toUpperCase()) {
-    return res.status(200).json({ accepted: false, reason: 'Destination bin must be different from the source bin.' });
-  }
-  // Not outbox material — the operator is standing at the destination bin
-  // waiting on a live accept/reject before scanning continues.
-  const result = await dataSource.validateTransferBin({ sourceBinCode, destinationBinCode, sku, qty });
+  // Split-only, live, never outbox-queued — the operator is standing at
+  // a candidate bin waiting on accept/reject, same reasoning as Put
+  // Away's validate-bin.
+  const result = await dataSource.validateTransferSplitBin({ docId, binCode, sku, qty });
   res.status(200).json(result);
 }
 
-async function confirmTransfer(req, res) {
-  const { sourceBinCode, destinationBinCode, sku, qty, reasonCode, reasonNote, scanLog } = req.body || {};
-  if (!sourceBinCode || !destinationBinCode || !sku || qty == null) {
-    throw ApiError.badRequest('sourceBinCode, destinationBinCode, sku, and qty are required.');
+async function suggestBin(req, res) {
+  const { docId, sku, qty, excludeBinCode } = req.body || {};
+  if (!docId || !sku || qty == null) {
+    throw ApiError.badRequest('docId, sku, and qty are required.');
   }
-  // reasonCode is optional (per product decision: Transfer's reason is
-  // optional, unlike Quarantine's). scanLog is optional/additive, same
-  // convention as confirmPutAwayItem.
-  const result = await dataSource.confirmTransfer({
-    sourceBinCode,
-    destinationBinCode,
-    sku,
-    qty,
-    reasonCode: reasonCode || null,
-    reasonNote: reasonNote || null,
-    scanLog,
-  });
+  const result = await dataSource.suggestTransferSplitBin({ docId, sku, qty, excludeBinCode });
+  res.status(200).json(result);
+}
+
+async function confirmItem(req, res) {
+  const { docId, sku, sourceBinCode, destinationBinCode, qty, scanLog } = req.body || {};
+  if (!docId || !sku || !sourceBinCode || !destinationBinCode || qty == null) {
+    throw ApiError.badRequest('docId, sku, sourceBinCode, destinationBinCode, and qty are required.');
+  }
+  // Local-first / outbox-queued on the client, same convention as
+  // confirmPutAwayItem — the source and destination bins were both
+  // already decided by Business Central when the document was assigned,
+  // so unlike the old ad-hoc design there's nothing left to validate live
+  // here; the operator's scans are a physical confirmation, not a
+  // judgment call the server needs to approve in real time.
+  const result = await dataSource.confirmTransferItem({ docId, sku, sourceBinCode, destinationBinCode, qty, scanLog });
   res.status(201).json(result);
 }
 
-module.exports = { getSourceBin, validateBin, confirmTransfer };
+module.exports = { listDocuments, getDocument, validateBin, suggestBin, confirmItem };
