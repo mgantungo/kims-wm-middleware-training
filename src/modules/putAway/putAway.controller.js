@@ -1,3 +1,4 @@
+// src/modules/putAway/putAway.controller.js
 const dataSource = require('../../data/dataSourceFactory');
 const ApiError = require('../../utils/apiError');
 
@@ -37,14 +38,18 @@ async function validateBin(req, res) {
 }
 
 async function suggestBin(req, res) {
-  const { docId, sku, qty, excludeBinCode } = req.body || {};
+  const { docId, sku, qty, excludeBinCodes } = req.body || {};
   if (!docId || !sku || qty == null) {
     throw ApiError.badRequest('docId, sku, and qty are required.');
   }
   // Same "live and blocking, never queued" reasoning as validateBin — the
   // operator is watching the split-bin animation waiting on this to
   // resolve, not something the offline outbox should ever replay.
-  const result = await dataSource.suggestPutAwayBin({ docId, sku, qty, excludeBinCode });
+  // excludeBinCodes is a list now, not a single code — the client sends
+  // every bin already belonging to this document, not just the one line
+  // came up short, so an auto-assigned remainder never lands somewhere
+  // already tied to this same task.
+  const result = await dataSource.suggestPutAwayBin({ docId, sku, qty, excludeBinCodes });
   res.status(200).json(result);
 }
 

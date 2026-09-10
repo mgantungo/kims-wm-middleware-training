@@ -132,24 +132,39 @@ class DemoDataSource {
   /// call, so two concurrent short/split events can't both be handed the
   /// same capacity — mirroring how a real WMS would place a soft
   /// allocation hold at suggestion time.
+  ///
+  /// excludeBinCodes covers EVERY bin already belonging to this Put Away
+  /// document, not just the one line came up short — an auto-assigned
+  /// remainder must never land in a bin already tied to this same task,
+  /// even a DIFFERENT line's destination, to avoid the confusing
+  /// "didn't I already handle this bin for a different item" situation.
   async suggestPutAwayBin(payload) {
-    const { docId, sku, qty, excludeBinCode } = payload || {};
+    const { docId, sku, qty, excludeBinCodes } = payload || {};
     if (!docId || !sku || qty == null) {
       throw ApiError.badRequest('docId, sku, and qty are required.');
     }
-    return this._suggestBinForSku(sku, qty, excludeBinCode);
+    return this._suggestBinForSku(sku, qty, excludeBinCodes);
   }
 
-  /// Shared bin-suggestion logic behind suggestPutAwayBin AND
-  /// suggestTransferSplitBin — both ask "find/reserve a bin with room for
-  /// [qty] units of [sku]", identical selection rules (prefer topping up
-  /// existing stock, else best-fit among empty bins), just triggered from
-  /// different flows. Reserves capacity immediately in the registry (see
+  /// Shared bin-suggestion logic behind suggestPutAwayBin,
+  /// suggestTransferSplitBin, and suggestQuarantineSplitBin — all ask
+  /// "find/reserve a bin with room for [qty] units of [sku]", identical
+  /// selection rules (prefer topping up existing stock, else best-fit
+  /// among empty bins), just triggered from different flows and with
+  /// different exclusion sets. [excludeBinCodes] accepts a single code
+  /// (string), a list of codes, or null/undefined — normalized to a Set
+  /// below either way. Reserves capacity immediately in the registry (see
   /// suggestPutAwayBin's original doc for why) rather than waiting for
   /// the eventual confirm call.
-  _suggestBinForSku(sku, qty, excludeBinCode) {
-    const excluded = excludeBinCode ? String(excludeBinCode).trim().toUpperCase() : null;
-    const entries = Object.entries(this._binRegistry).filter(([code]) => code !== excluded);
+  _suggestBinForSku(sku, qty, excludeBinCodes) {
+    const excludedList = excludeBinCodes == null
+      ? []
+      : Array.isArray(excludeBinCodes)
+        ? excludeBinCodes
+        : [excludeBinCodes];
+    const excluded = new Set(excludedList.filter(Boolean).map((c) => String(c).trim().toUpperCase()));
+
+    const entries = Object.entries(this._binRegistry).filter(([code]) => !excluded.has(code));
 
     const topUpCandidates = entries
       .filter(([, bin]) => bin.occupantSku === sku && bin.capacity - bin.currentQty >= qty)
