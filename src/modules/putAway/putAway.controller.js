@@ -53,4 +53,17 @@ async function suggestBin(req, res) {
   res.status(200).json(result);
 }
 
-module.exports = { listDocuments, getDocument, confirmItem, validateBin, suggestBin };
+async function checkBin(req, res) {
+  const { binCode } = req.body || {};
+  if (!binCode) {
+    throw ApiError.badRequest('binCode is required.');
+  }
+  // Live and blocking, same reasoning as validateBin/suggestBin — the
+  // operator is standing at a bin they've chosen themselves (for a line
+  // Business Central left unassigned) waiting on accept/reject before
+  // they can start scanning items into it.
+  const result = await dataSource.checkPutAwayBin({ binCode });
+  res.status(200).json(result);
+}
+
+module.exports = { listDocuments, getDocument, confirmItem, validateBin, suggestBin, checkBin };

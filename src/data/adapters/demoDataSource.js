@@ -1,4 +1,5 @@
 // src/data/adapters/demoDataSource.js
+
 const ApiError = require('../../utils/apiError');
 
 /**
@@ -194,6 +195,31 @@ class DemoDataSource {
       currentQty: currentQtyBeforeReservation,
       capacityRemaining: bin.capacity - bin.currentQty,
     };
+  }
+
+  /// MOCKED for now, per product decision — a real implementation would
+  /// query Business Central's bin/location master data directly. Only
+  /// ever asked for a line Business Central did NOT pre-assign a
+  /// destination for (see dataSource.interface.js) — the operator scans
+  /// a bin FIRST, before any item is scanned, so there's no sku/qty yet
+  /// to check capacity against. This is deliberately simpler than
+  /// suggestPutAwayBin/validatePutAwayBin: it only asks "is this bin
+  /// currently empty," not "is there room for N units of X." No
+  /// reservation happens here — the bin's actual occupancy only changes
+  /// once the operator scans real items into it and that gets confirmed,
+  /// same as any other line.
+  async checkPutAwayBin(payload) {
+    const { binCode } = payload || {};
+    const normalized = String(binCode || '').trim().toUpperCase();
+    const bin = this._binRegistry[normalized];
+
+    if (!bin) {
+      return { available: false, reason: `Bin "${normalized}" is not recognized.` };
+    }
+    if (bin.occupantSku) {
+      return { available: false, reason: `Bin ${normalized} already holds ${bin.occupantSku}.` };
+    }
+    return { available: true };
   }
 
   // ------------------------------------------------------------------
@@ -548,6 +574,21 @@ function seedPutAwayDocs() {
       status: 'assigned',
       receivedFromLocation: 'DOCK-1',
       items: [{ sku: 'SKU-3001', description: 'Galvanized Steel Brackets', qty: 75, location: 'RCV-B2' }],
+    },
+    'PA-00127': {
+      docId: 'PA-00127',
+      sourceWarehouseReceipt: 'WHR-54324',
+      status: 'assigned',
+      receivedFromLocation: 'DOCK-2',
+      // Mixes a BC-assigned line (used without exception, same as every
+      // other document) with two UNASSIGNED lines (location: null) — the
+      // operator picks a bin for these on the floor, scanned and checked
+      // live via POST /put-away/check-bin before any item is scanned.
+      items: [
+        { sku: 'SKU-1001', description: '12oz Organic Coffee Beans', qty: 30, location: 'RCV-A1' },
+        { sku: 'SKU-BOLT-M6', description: 'Hex Bolt, M6 x 20mm', qty: 12, location: null },
+        { sku: 'SKU-NAIL-2IN', description: 'Finish Nail, 2 inch', qty: 18, location: null },
+      ],
     },
   };
 }

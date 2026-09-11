@@ -1,3 +1,4 @@
+// src/modules/putAway/putAway.routes.js
 const express = require('express');
 const asyncHandler = require('../../utils/asyncHandler');
 const controller = require('./putAway.controller');
@@ -14,5 +15,8 @@ router.post('/confirm', asyncHandler(controller.confirmItem));
 router.post('/validate-bin', asyncHandler(controller.validateBin));
 // POST /put-away/suggest-bin
 router.post('/suggest-bin', asyncHandler(controller.suggestBin));
+// POST /put-away/check-bin — for a line Business Central left unassigned:
+// is the bin the operator just scanned available to become its location?
+router.post('/check-bin', asyncHandler(controller.checkBin));
 
 module.exports = router;

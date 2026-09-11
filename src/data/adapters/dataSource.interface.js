@@ -64,15 +64,28 @@
  *   Operator-scanned-candidate path — kept for a possible future manual
  *   override, not currently wired to the app's "Stop & Split" button.
  * suggestPutAwayBin(payload)            -> { available: boolean, binCode?, isTopUp?, currentQty?, capacityRemaining?, reason? }
- *   payload: { docId, sku, qty, excludeBinCode? }
+ *   payload: { docId, sku, qty, excludeBinCodes? }
  *   "Stop & Split" flow: the operator does NOT choose a bin — this asks
  *   Business Central to find one with enough free capacity for the
  *   remainder, which may be an empty bin OR a "topup" of a bin already
  *   holding the same sku (isTopUp: true, with currentQty being that bin's
- *   quantity BEFORE this reservation). available: false is a normal
- *   response (no suitable bin right now), not an error — only missing
- *   required fields should throw ApiError.badRequest, same convention as
+ *   quantity BEFORE this reservation). excludeBinCodes covers EVERY bin
+ *   already belonging to the document, not just the one line came up
+ *   short — an auto-assigned remainder must never land in a bin already
+ *   tied to this same task. available: false is a normal response (no
+ *   suitable bin right now), not an error — only missing required fields
+ *   should throw ApiError.badRequest, same convention as
  *   confirmPutAwayItem/validatePutAwayBin.
+ * checkPutAwayBin(payload)               -> { available: boolean, reason?: string }
+ *   payload: { binCode }
+ *   Bin-first assignment for a line Business Central left UNASSIGNED
+ *   (PutAwayLineItem.location is null): the operator scans a bin before
+ *   any item, and this asks whether that bin is available to become the
+ *   line's location. Deliberately simpler than validatePutAwayBin — no
+ *   sku/qty is known yet at this point, so this only checks "is the bin
+ *   currently empty," not capacity for a specific item. MOCKED in
+ *   demoDataSource.js pending a real Business Central bin/location
+ *   lookup.
  * getPickDocuments()                    -> { documents: PickDocument[] }
  * getPickDocument(docId)                -> PickDocument
  * confirmPickItem(payload)              -> { ok: true }

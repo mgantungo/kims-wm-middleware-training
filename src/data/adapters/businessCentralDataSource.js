@@ -38,6 +38,7 @@ class BusinessCentralDataSource {
   async confirmPutAwayItem() { return this._notImplemented('confirmPutAwayItem'); }
   async validatePutAwayBin() { return this._notImplemented('validatePutAwayBin'); }
   async suggestPutAwayBin() { return this._notImplemented('suggestPutAwayBin'); }
+  async checkPutAwayBin() { return this._notImplemented('checkPutAwayBin'); }
   async getPickDocuments() { return this._notImplemented('getPickDocuments'); }
   async getPickDocument() { return this._notImplemented('getPickDocument'); }
   async confirmPickItem() { return this._notImplemented('confirmPickItem'); }
