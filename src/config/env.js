@@ -21,8 +21,8 @@ if (!['training', 'production'].includes(KIMS_ENV)) {
 }
 
 const DATA_SOURCE = process.env.DATA_SOURCE || 'demo';
-if (!['demo', 'businessCentral'].includes(DATA_SOURCE)) {
-  throw new Error(`DATA_SOURCE must be "demo" or "businessCentral", got "${DATA_SOURCE}"`);
+if (!['demo', 'businessCentral', 'hybrid'].includes(DATA_SOURCE)) {
+  throw new Error(`DATA_SOURCE must be "demo", "businessCentral", or "hybrid", got "${DATA_SOURCE}"`);
 }
 
 if (DATA_SOURCE === 'demo' && KIMS_ENV === 'production') {
@@ -34,10 +34,24 @@ if (DATA_SOURCE === 'demo' && KIMS_ENV === 'production') {
   console.warn('[config] WARNING: KIMS_ENV=production but DATA_SOURCE=demo. Confirm this is intentional.');
 }
 
+// Only meaningful when DATA_SOURCE=hybrid — which of Put Away's two read
+// methods (getPutAwayDocuments/getPutAwayDocument) hit Business Central
+// vs. stay on demo data. Every OTHER method in hybrid mode is always
+// demo regardless of this value — see hybridDataSource.js. This is the
+// one flag a genuinely phased rollout flips per phase; DATA_SOURCE itself
+// should just stay "hybrid" throughout.
+const PUT_AWAY_READ_SOURCE = process.env.PUT_AWAY_READ_SOURCE || 'demo';
+if (!['demo', 'businessCentral'].includes(PUT_AWAY_READ_SOURCE)) {
+  throw new Error(`PUT_AWAY_READ_SOURCE must be "demo" or "businessCentral", got "${PUT_AWAY_READ_SOURCE}"`);
+}
+
 // Business Central uses HTTP Basic Auth (username + Web Service Access
 // Key), not OAuth2 — see the KIMS-WM API Endpoint Reference doc, Section
-// 1. Only required when DATA_SOURCE=businessCentral; a demo-only
-// deployment never touches these and shouldn't have to set them.
+// 1. Only required when Business Central is ACTUALLY reachable through
+// the current config — either DATA_SOURCE=businessCentral outright, or
+// DATA_SOURCE=hybrid with PUT_AWAY_READ_SOURCE=businessCentral. A
+// demo-only deployment never touches these and shouldn't have to set
+// them.
 const businessCentral = {
   baseUrl: process.env.BC_BASE_URL || null,
   companyId: process.env.BC_COMPANY_ID || null,
@@ -45,14 +59,17 @@ const businessCentral = {
   password: process.env.BC_PASSWORD || null,
 };
 
-if (DATA_SOURCE === 'businessCentral') {
+const businessCentralInUse =
+  DATA_SOURCE === 'businessCentral' || (DATA_SOURCE === 'hybrid' && PUT_AWAY_READ_SOURCE === 'businessCentral');
+
+if (businessCentralInUse) {
   const missing = Object.entries(businessCentral)
     .filter(([, value]) => !value)
     .map(([key]) => key);
   if (missing.length > 0) {
     throw new Error(
-      `DATA_SOURCE=businessCentral requires BC_BASE_URL, BC_COMPANY_ID, BC_USERNAME, and BC_PASSWORD to all be set — ` +
-        `missing: ${missing.join(', ')}.`,
+      `Business Central is in use (DATA_SOURCE=${DATA_SOURCE}${DATA_SOURCE === 'hybrid' ? `, PUT_AWAY_READ_SOURCE=${PUT_AWAY_READ_SOURCE}` : ''}) ` +
+        `but BC_BASE_URL, BC_COMPANY_ID, BC_USERNAME, and BC_PASSWORD aren't all set — missing: ${missing.join(', ')}.`,
     );
   }
 }
@@ -61,6 +78,7 @@ module.exports = {
   env: KIMS_ENV,
   port: parseInt(process.env.PORT || '3000', 10),
   dataSource: DATA_SOURCE,
+  putAwayReadSource: PUT_AWAY_READ_SOURCE,
   jwt: {
     secret: required('JWT_SECRET'),
     expiresIn: process.env.JWT_EXPIRES_IN || '12h',
