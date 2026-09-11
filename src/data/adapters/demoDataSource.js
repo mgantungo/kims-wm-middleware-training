@@ -1,5 +1,4 @@
 // src/data/adapters/demoDataSource.js
-
 const ApiError = require('../../utils/apiError');
 
 /**
@@ -201,23 +200,32 @@ class DemoDataSource {
   /// query Business Central's bin/location master data directly. Only
   /// ever asked for a line Business Central did NOT pre-assign a
   /// destination for (see dataSource.interface.js) — the operator scans
-  /// a bin FIRST, before any item is scanned, so there's no sku/qty yet
-  /// to check capacity against. This is deliberately simpler than
-  /// suggestPutAwayBin/validatePutAwayBin: it only asks "is this bin
-  /// currently empty," not "is there room for N units of X." No
-  /// reservation happens here — the bin's actual occupancy only changes
-  /// once the operator scans real items into it and that gets confirmed,
-  /// same as any other line.
+  /// a bin before scanning any actual units, but the app already knows
+  /// WHICH line it's assigning a bin for at that point (there's no
+  /// "assign a bin with no idea what's going in it" case), so sku IS
+  /// available here despite no units being scanned yet. Deliberately
+  /// simpler than suggestPutAwayBin/validatePutAwayBin though: this never
+  /// checks CAPACITY (no qty is known/relevant yet), only whether the
+  /// bin's current occupant, if any, is unrelated to this sku.
+  ///
+  /// Three outcomes: empty bin -> accepted. Occupied by the SAME sku ->
+  /// accepted (a legitimate top-up, same as suggestPutAwayBin's isTopUp
+  /// case). Occupied by a DIFFERENT sku -> rejected — a bin already
+  /// holding unrelated stock must never be handed to the operator as a
+  /// valid destination. No reservation happens here either way — the
+  /// bin's actual occupancy only changes once the operator scans real
+  /// items into it and that gets confirmed, same as any other line.
   async checkPutAwayBin(payload) {
-    const { binCode } = payload || {};
-    const normalized = String(binCode || '').trim().toUpperCase();
-    const bin = this._binRegistry[normalized];
+    const { binCode, sku } = payload || {};
+    const normalizedBin = String(binCode || '').trim().toUpperCase();
+    const normalizedSku = String(sku || '').trim().toUpperCase();
+    const bin = this._binRegistry[normalizedBin];
 
     if (!bin) {
-      return { available: false, reason: `Bin "${normalized}" is not recognized.` };
+      return { available: false, reason: `Bin "${normalizedBin}" is not recognized.` };
     }
-    if (bin.occupantSku) {
-      return { available: false, reason: `Bin ${normalized} already holds ${bin.occupantSku}.` };
+    if (bin.occupantSku && bin.occupantSku !== normalizedSku) {
+      return { available: false, reason: `Bin ${normalizedBin} already holds unrelated stock (${bin.occupantSku}).` };
     }
     return { available: true };
   }

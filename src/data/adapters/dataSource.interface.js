@@ -77,15 +77,17 @@
  *   should throw ApiError.badRequest, same convention as
  *   confirmPutAwayItem/validatePutAwayBin.
  * checkPutAwayBin(payload)               -> { available: boolean, reason?: string }
- *   payload: { binCode }
+ *   payload: { binCode, sku }
  *   Bin-first assignment for a line Business Central left UNASSIGNED
  *   (PutAwayLineItem.location is null): the operator scans a bin before
- *   any item, and this asks whether that bin is available to become the
- *   line's location. Deliberately simpler than validatePutAwayBin — no
- *   sku/qty is known yet at this point, so this only checks "is the bin
- *   currently empty," not capacity for a specific item. MOCKED in
- *   demoDataSource.js pending a real Business Central bin/location
- *   lookup.
+ *   any actual UNITS are scanned, but the app already knows which LINE
+ *   it's assigning a bin for at that point, so sku IS available here.
+ *   Deliberately simpler than validatePutAwayBin though — no qty is
+ *   known/relevant yet, so this never checks CAPACITY, only whether the
+ *   bin's occupant (if any) is unrelated to sku: empty -> accepted,
+ *   occupied by the SAME sku -> accepted (a legitimate top-up), occupied
+ *   by a DIFFERENT sku -> rejected. MOCKED in demoDataSource.js pending a
+ *   real Business Central bin/location lookup.
  * getPickDocuments()                    -> { documents: PickDocument[] }
  * getPickDocument(docId)                -> PickDocument
  * confirmPickItem(payload)              -> { ok: true }

@@ -54,15 +54,19 @@ async function suggestBin(req, res) {
 }
 
 async function checkBin(req, res) {
-  const { binCode } = req.body || {};
-  if (!binCode) {
-    throw ApiError.badRequest('binCode is required.');
+  const { binCode, sku } = req.body || {};
+  if (!binCode || !sku) {
+    throw ApiError.badRequest('binCode and sku are required.');
   }
   // Live and blocking, same reasoning as validateBin/suggestBin — the
   // operator is standing at a bin they've chosen themselves (for a line
   // Business Central left unassigned) waiting on accept/reject before
-  // they can start scanning items into it.
-  const result = await dataSource.checkPutAwayBin({ binCode });
+  // they can start scanning items into it. sku is required here even
+  // though no units have been scanned yet — the app already knows which
+  // LINE it's assigning a bin for, and the middleware needs it to tell
+  // "empty or already holds this same item" apart from "holds something
+  // unrelated."
+  const result = await dataSource.checkPutAwayBin({ binCode, sku });
   res.status(200).json(result);
 }
 
