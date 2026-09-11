@@ -1,3 +1,4 @@
+// src/config/env.js
 require('dotenv').config();
 
 /**
@@ -33,6 +34,29 @@ if (DATA_SOURCE === 'demo' && KIMS_ENV === 'production') {
   console.warn('[config] WARNING: KIMS_ENV=production but DATA_SOURCE=demo. Confirm this is intentional.');
 }
 
+// Business Central uses HTTP Basic Auth (username + Web Service Access
+// Key), not OAuth2 — see the KIMS-WM API Endpoint Reference doc, Section
+// 1. Only required when DATA_SOURCE=businessCentral; a demo-only
+// deployment never touches these and shouldn't have to set them.
+const businessCentral = {
+  baseUrl: process.env.BC_BASE_URL || null,
+  companyId: process.env.BC_COMPANY_ID || null,
+  username: process.env.BC_USERNAME || null,
+  password: process.env.BC_PASSWORD || null,
+};
+
+if (DATA_SOURCE === 'businessCentral') {
+  const missing = Object.entries(businessCentral)
+    .filter(([, value]) => !value)
+    .map(([key]) => key);
+  if (missing.length > 0) {
+    throw new Error(
+      `DATA_SOURCE=businessCentral requires BC_BASE_URL, BC_COMPANY_ID, BC_USERNAME, and BC_PASSWORD to all be set — ` +
+        `missing: ${missing.join(', ')}.`,
+    );
+  }
+}
+
 module.exports = {
   env: KIMS_ENV,
   port: parseInt(process.env.PORT || '3000', 10),
@@ -48,11 +72,5 @@ module.exports = {
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean),
-  businessCentral: {
-    tenantId: process.env.BC_TENANT_ID || null,
-    environmentName: process.env.BC_ENVIRONMENT_NAME || null,
-    clientId: process.env.BC_CLIENT_ID || null,
-    clientSecret: process.env.BC_CLIENT_SECRET || null,
-    companyId: process.env.BC_COMPANY_ID || null,
-  },
+  businessCentral,
 };
