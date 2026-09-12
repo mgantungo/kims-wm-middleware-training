@@ -128,6 +128,31 @@
  * generateGatePass(payload)             -> GatePass
  * searchItem(query)                     -> ItemInquiryResult
  * searchBin(code)                       -> BinInquiryResult
+ *   { binCode, location, isActive, items: [], contentsAvailable,
+ *     lastSyncedAt, binDescription?, binTypeCode?, zoneCode?, isEmpty? }
+ *   Business Central's version (Section 2.2, GET /Bins) is a DELIBERATELY
+ *   PARTIAL mapping — real bin metadata (location/zone/type/description/
+ *   barcode/empty-status) but never CONTENTS, since no documented
+ *   endpoint exposes what sku/qty is actually sitting in a bin. items is
+ *   always [] from that adapter, paired with contentsAvailable: false so
+ *   an empty array can't be misread as "this bin is physically empty" —
+ *   the demo adapter's items (with real sku/batch/units) has nothing to
+ *   map from. Every field the demo adapter already returns keeps the
+ *   same meaning here; the rest are additive.
+ * listBins()                             -> { bins: BinSummary[] }
+ *   The "browse all bins" view — unfiltered Section 2.2 (GET /Bins) on
+ *   the Business Central side, the shared in-memory _binRegistry
+ *   (unfiltered) on the demo side. Distinct from searchBin above, which
+ *   looks up exactly one binCode. Field shape per bin: { binCode,
+ *   isEmpty, occupantSku?, capacity?, currentQty?, binDescription?,
+ *   locationCode?, zoneCode?, binTypeCode?, binBarCode? } — binCode/
+ *   isEmpty are meaningful from both sources; occupantSku/capacity/
+ *   currentQty are demo-only (no Business Central equivalent — /Bins has
+ *   no contents or capacity field, same gap as searchBin above);
+ *   binDescription/locationCode/zoneCode/binTypeCode/binBarCode are
+ *   Business-Central-only (demo's _binRegistry has no such metadata).
+ *   Never guess a value for a field the current source can't actually
+ *   provide — omit it, same convention as searchBin.
  * trackPallet(palletId)                 -> PalletTrackingResult
  *
  * -- Quarantine (document-driven, per Klan's control requirement: same

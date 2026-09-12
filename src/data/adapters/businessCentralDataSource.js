@@ -351,7 +351,86 @@ class BusinessCentralDataSource {
   async confirmShipLoad() { return this._notImplemented('confirmShipLoad'); }
   async generateGatePass() { return this._notImplemented('generateGatePass'); }
   async searchItem() { return this._notImplemented('searchItem'); }
-  async searchBin() { return this._notImplemented('searchBin'); }
+
+  /// Maps onto Section 2.2, GET /Bins, filtered to one bin code.
+  ///
+  /// IMPORTANT — this is a DELIBERATELY partial mapping, not a full
+  /// bin-inquiry implementation. GET /Bins gives real metadata (location,
+  /// zone, type, description, barcode, and whether the bin is empty) but
+  /// NEVER a list of what's actually sitting in it — no documented
+  /// Business Central endpoint exposes bin contents (sku + qty per bin)
+  /// at all. Rather than silently return items: [] and let that look
+  /// identical to "this bin is genuinely empty," [contentsAvailable]:
+  /// false is included specifically so a caller can distinguish "we
+  /// don't have this data" from "the bin has nothing in it" — the demo
+  /// adapter's items array (with real sku/batch/units) has no Business
+  /// Central equivalent to source it from.
+  ///
+  /// Every field the demo adapter returns (binCode, location, isActive,
+  /// items, lastSyncedAt) is still present here with the same meaning, so
+  /// nothing currently reading those specific fields breaks — the extra
+  /// fields below (binDescription, binTypeCode, zoneCode, isEmpty) are
+  /// purely additive.
+  async searchBin(binCode) {
+    if (!binCode) throw ApiError.badRequest('binCode is required.');
+    const escaped = String(binCode).replace(/'/g, "''");
+    const data = await this._bcGet(`Bins?$filter=binCode eq '${escaped}'`);
+    const bin = (data.value || [])[0];
+    if (!bin) throw ApiError.notFound(`Bin "${binCode}" is not recognized.`);
+
+    return {
+      binCode: bin.binCode,
+      location: bin.locationCode,
+      isActive: true, // found in Business Central's own bin registry
+      items: [],
+      contentsAvailable: false,
+      lastSyncedAt: new Date().toISOString(),
+      // Additive — real Business Central metadata the demo shape never
+      // had, ignored harmlessly by any caller that doesn't know about it.
+      binDescription: bin.binDescription,
+      binTypeCode: bin.binTypeCode,
+      zoneCode: bin.zoneCode,
+      isEmpty: bin.isEmpty,
+    };
+  }
+
+  /// Lists every bin from Section 2.2 (GET /Bins), unfiltered — the
+  /// "browse all bins" view, distinct from searchBin above which filters
+  /// to one binCode. Same field shape as demoDataSource.js's listBins
+  /// where both sources can support it (binCode, isEmpty); Business
+  /// Central additionally provides real metadata demo never had
+  /// (binDescription, locationCode, zoneCode, binTypeCode, binBarCode).
+  /// capacity/currentQty/occupantSku are demo-only concepts — the /Bins
+  /// endpoint has no capacity or contents field at all (see
+  /// businessCentralDataSource.js's searchBin doc for the same gap on
+  /// the single-bin lookup) — so they're simply absent here rather than
+  /// guessed at.
+  /// [locationCode], when given, is applied server-side via OData
+  /// $filter (same pattern already proven by searchBin's binCode
+  /// filter) — meaningful for a warehouse with more than one BC
+  /// location, where fetching every bin everywhere just to look at one
+  /// location's would be wasteful. isEmpty is deliberately NOT filtered
+  /// here — that's left to the Flutter side to apply client-side over
+  /// whichever bins this call already returned, so toggling it doesn't
+  /// cost a network round trip.
+  async listBins(locationCode) {
+    const path = locationCode
+      ? `Bins?$filter=locationCode eq '${String(locationCode).replace(/'/g, "''")}'`
+      : 'Bins';
+    const data = await this._bcGet(path);
+    return {
+      bins: (data.value || []).map((bin) => ({
+        binCode: bin.binCode,
+        isEmpty: bin.isEmpty,
+        binDescription: bin.binDescription,
+        locationCode: bin.locationCode,
+        zoneCode: bin.zoneCode,
+        binTypeCode: bin.binTypeCode,
+        binBarCode: bin.binBarCode,
+      })),
+    };
+  }
+
   async trackPallet() { return this._notImplemented('trackPallet'); }
 
   // Item Transfer — document-driven: expected to map onto Business

@@ -27,11 +27,12 @@ const BusinessCentralDataSource = require('./businessCentralDataSource');
  * adapter.
  */
 class HybridDataSource {
-  constructor({ businessCentralConfig, putAwayReadSource, putAwayConfirmSource }) {
+  constructor({ businessCentralConfig, putAwayReadSource, putAwayConfirmSource, binInquirySource }) {
     this._demo = demoDataSource;
     this._bc = new BusinessCentralDataSource(businessCentralConfig);
     this._putAwayReadSource = putAwayReadSource; // 'demo' | 'businessCentral'
     this._putAwayConfirmSource = putAwayConfirmSource; // 'demo' | 'businessCentral'
+    this._binInquirySource = binInquirySource; // 'demo' | 'businessCentral'
   }
 
   _putAwayReadTarget() {
@@ -40,6 +41,10 @@ class HybridDataSource {
 
   _putAwayConfirmTarget() {
     return this._putAwayConfirmSource === 'businessCentral' ? this._bc : this._demo;
+  }
+
+  _binInquiryTarget() {
+    return this._binInquirySource === 'businessCentral' ? this._bc : this._demo;
   }
 
   // ---------------- Put Away — read and confirm are independently routable ----------------
@@ -88,7 +93,21 @@ class HybridDataSource {
   async confirmShipLoad(...args) { return this._demo.confirmShipLoad(...args); }
   async generateGatePass(...args) { return this._demo.generateGatePass(...args); }
   async searchItem(...args) { return this._demo.searchItem(...args); }
-  async searchBin(...args) { return this._demo.searchBin(...args); }
+
+  /// Independently routable — a read-only lookup, not tied to Put Away's
+  /// read/confirm flags at all (Bin Inquiry is its own module). See
+  /// businessCentralDataSource.js's searchBin for why the response is
+  /// only ever a partial mapping — Business Central has no documented
+  /// bin-CONTENTS endpoint, only bin metadata.
+  async searchBin(...args) {
+    return this._binInquiryTarget().searchBin(...args);
+  }
+
+  /// Same routing flag as searchBin — same module, same concern.
+  async listBins(...args) {
+    return this._binInquiryTarget().listBins(...args);
+  }
+
   async trackPallet(...args) { return this._demo.trackPallet(...args); }
 
   async getTransferDocuments(...args) { return this._demo.getTransferDocuments(...args); }

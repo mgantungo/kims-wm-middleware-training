@@ -16,6 +16,12 @@ async function bin(req, res) {
   res.json(result);
 }
 
+async function bins(req, res) {
+  const locationCode = req.query.locationCode;
+  const result = await dataSource.listBins(locationCode);
+  res.json(result);
+}
+
 async function pallet(req, res) {
   const id = req.query.id;
   if (!id) throw ApiError.badRequest('Query parameter "id" is required.');
@@ -23,4 +29,4 @@ async function pallet(req, res) {
   res.json(result);
 }
 
-module.exports = { item, bin, pallet };
+module.exports = { item, bin, bins, pallet };

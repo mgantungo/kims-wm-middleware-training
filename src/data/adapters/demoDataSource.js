@@ -1,5 +1,4 @@
 // src/data/adapters/demoDataSource.js
-// src/data/adapters/demoDataSource.js
 const ApiError = require('../../utils/apiError');
 
 /**
@@ -343,6 +342,39 @@ class DemoDataSource {
         { name: 'Hex Nut M10', sku: 'HN-M10-X', batch: 'B2023-02', units: 300 },
       ],
       lastSyncedAt: new Date().toISOString(),
+    };
+  }
+
+  /// Lists every bin, for the "browse all bins" view — distinct from
+  /// searchBin above, which looks up ONE bin by code and (in this demo
+  /// adapter) returns a fixed fake response regardless of what's
+  /// searched. This instead exposes the REAL shared _binRegistry state —
+  /// the same one suggestPutAwayBin/checkPutAwayBin read and write — so
+  /// a demo session's actual interactions (an auto-assigned split
+  /// reserving a bin, a bin-first assignment occupying one) are visible
+  /// here, not just static seed data.
+  ///
+  /// Field shape matches businessCentralDataSource.js's version as
+  /// closely as each source's real data allows: binCode/isEmpty are
+  /// meaningful for both. capacity/currentQty/occupantSku are demo-only
+  /// (Business Central's /Bins endpoint has no capacity or contents
+  /// field at all — see that adapter's own listBins) and simply absent
+  /// from the Business Central response rather than faked here.
+  /// locationCode is accepted for signature parity with
+  /// businessCentralDataSource.js's listBins, but genuinely ignored here
+  /// — the demo bin registry has no location association per bin at
+  /// all (it's a flat capacity/occupancy map, not a real multi-location
+  /// model), so there's nothing honest to filter by. Always returns
+  /// every demo bin.
+  async listBins(locationCode) {
+    return {
+      bins: Object.entries(this._binRegistry).map(([binCode, bin]) => ({
+        binCode,
+        isEmpty: !bin.occupantSku,
+        occupantSku: bin.occupantSku || null,
+        capacity: bin.capacity,
+        currentQty: bin.currentQty,
+      })),
     };
   }
 
