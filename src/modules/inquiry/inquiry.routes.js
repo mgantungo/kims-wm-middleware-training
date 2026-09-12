@@ -1,3 +1,4 @@
+// src/modules/inquiry/inquiry.routes.js
 const express = require('express');
 const asyncHandler = require('../../utils/asyncHandler');
 const controller = require('./inquiry.controller');

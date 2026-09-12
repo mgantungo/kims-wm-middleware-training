@@ -1,3 +1,4 @@
+// src/modules/inquiry/inquiry.controller.js
 const dataSource = require('../../data/dataSourceFactory');
 const ApiError = require('../../utils/apiError');
 
