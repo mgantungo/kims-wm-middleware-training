@@ -88,6 +88,21 @@
  *   occupied by the SAME sku -> accepted (a legitimate top-up), occupied
  *   by a DIFFERENT sku -> rejected. MOCKED in demoDataSource.js pending a
  *   real Business Central bin/location lookup.
+ * registerPutAway(payload)               -> { ok: true }
+ *   payload: { docId, bcPutAwayId }
+ *   Whole-document "Register" event — maps onto Business Central's POST
+ *   .../putAways(bcPutAwayId)/Microsoft.NAV.Register (Section 2.6), its
+ *   own equivalent of pressing "Register" once every line on the
+ *   document has been handled. Called once, right after a document's
+ *   last line is confirmed (see PutAwayItemController.
+ *   _refreshAfterConfirmation / PutAwayRepository.registerDocument).
+ *   Replayed from the sync outbox like confirmPutAwayItem, not live and
+ *   blocking like validatePutAwayBin/suggestPutAwayBin/checkPutAwayBin —
+ *   there's no operator standing at a bin waiting on this one. demoData-
+ *   Source.js's version is a trivial no-op ({ ok: true }): a demo
+ *   document is already fully described by doc.status flipping to
+ *   'complete' once every item is confirmed, with no separate posting
+ *   step to model.
  * getPickDocuments()                    -> { documents: PickDocument[] }
  * getPickDocument(docId)                -> PickDocument
  * confirmPickItem(payload)              -> { ok: true }

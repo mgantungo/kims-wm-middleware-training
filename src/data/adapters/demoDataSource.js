@@ -1,4 +1,5 @@
 // src/data/adapters/demoDataSource.js
+// src/data/adapters/demoDataSource.js
 const ApiError = require('../../utils/apiError');
 
 /**
@@ -228,6 +229,19 @@ class DemoDataSource {
       return { available: false, reason: `Bin ${normalizedBin} already holds unrelated stock (${bin.occupantSku}).` };
     }
     return { available: true };
+  }
+
+  /// Demo has no Business Central "Register" action to call — by the time
+  /// every line is confirmed (see confirmPutAwayItem above, which already
+  /// flips doc.status to 'complete' once doc._confirmed covers every
+  /// item), there's nothing further for a demo document's Register step
+  /// to do. Trivially succeeds so the app-side flow (which calls this
+  /// unconditionally once a document completes) never has to special-case
+  /// which adapter it's talking to.
+  async registerPutAway(payload) {
+    const { docId } = payload || {};
+    if (!docId) throw ApiError.badRequest('docId is required.');
+    return { ok: true };
   }
 
   // ------------------------------------------------------------------

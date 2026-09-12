@@ -3,33 +3,46 @@ const demoDataSource = require('./demoDataSource');
 const BusinessCentralDataSource = require('./businessCentralDataSource');
 
 /**
- * Makes a genuinely phased rollout possible: one method (or a few) can be
+ * Makes a genuinely phased rollout possible: individual methods can be
  * routed to Business Central while every other method stays on demo data,
  * AT THE SAME TIME, in the same deployment — unlike DATA_SOURCE=
  * businessCentral directly, which switches the ENTIRE adapter at once and
  * breaks every module Business Central integration hasn't reached yet
  * (Transfer, Quarantine, Pick, etc. all throw BC_NOT_IMPLEMENTED the
- * moment that flag flips, even though only Put Away's read path has
- * actually been migrated).
+ * moment that flag flips, even though only Put Away has actually been
+ * migrated).
+ *
+ * Put Away's read (getPutAwayDocuments/getPutAwayDocument) and confirm
+ * (confirmPutAwayItem) are routed INDEPENDENTLY, each behind its own env
+ * var — reading from Business Central is low-risk (nothing changes),
+ * confirming WRITES to a live inventory system, so being able to verify
+ * reads before ever trusting writes is the point, not a detail to
+ * collapse into one flag.
  *
  * Each future phase is one change here: move a method's line from the
  * "always demo" section to the routed section, backed by its own env var
- * the same way PUT_AWAY_READ_SOURCE works below. Nothing else in the
- * codebase needs to change — routes/controllers only ever talk to
- * `dataSource` from dataSourceFactory.js, never a specific adapter.
+ * the same way PUT_AWAY_READ_SOURCE/PUT_AWAY_CONFIRM_SOURCE work below.
+ * Nothing else in the codebase needs to change — routes/controllers only
+ * ever talk to `dataSource` from dataSourceFactory.js, never a specific
+ * adapter.
  */
 class HybridDataSource {
-  constructor({ businessCentralConfig, putAwayReadSource }) {
+  constructor({ businessCentralConfig, putAwayReadSource, putAwayConfirmSource }) {
     this._demo = demoDataSource;
     this._bc = new BusinessCentralDataSource(businessCentralConfig);
     this._putAwayReadSource = putAwayReadSource; // 'demo' | 'businessCentral'
+    this._putAwayConfirmSource = putAwayConfirmSource; // 'demo' | 'businessCentral'
   }
 
   _putAwayReadTarget() {
     return this._putAwayReadSource === 'businessCentral' ? this._bc : this._demo;
   }
 
-  // ---------------- Put Away — read path is routable ----------------
+  _putAwayConfirmTarget() {
+    return this._putAwayConfirmSource === 'businessCentral' ? this._bc : this._demo;
+  }
+
+  // ---------------- Put Away — read and confirm are independently routable ----------------
   async getPutAwayDocuments(...args) {
     return this._putAwayReadTarget().getPutAwayDocuments(...args);
   }
@@ -38,10 +51,29 @@ class HybridDataSource {
     return this._putAwayReadTarget().getPutAwayDocument(...args);
   }
 
-  // Confirm/validate/suggest/check-bin have no Business Central
+  /// Deliberately a SEPARATE flag from read, not reused — reading from
+  /// Business Central is low-risk (nothing changes), confirming WRITES to
+  /// a live inventory system. Being able to verify reads against real
+  /// data before ever trusting writes to it is the whole point of
+  /// keeping these independent, not a detail to collapse away.
+  async confirmPutAwayItem(...args) {
+    return this._putAwayConfirmTarget().confirmPutAwayItem(...args);
+  }
+
+  /// Same routing flag as confirmPutAwayItem, not read — Register is part
+  /// of the same "writes to Business Central" lifecycle as confirming a
+  /// line, fired once every line on a document is done. Keeping it on the
+  /// confirm flag (rather than adding a third, separate one) means the
+  /// two can never end up out of sync with each other — no state where
+  /// line confirms go to Business Central but the final Register call
+  /// silently doesn't, or vice versa.
+  async registerPutAway(...args) {
+    return this._putAwayConfirmTarget().registerPutAway(...args);
+  }
+
+  // validate-bin/suggest-bin/check-bin have no Business Central
   // counterpart yet (see businessCentralDataSource.js's class doc) — no
   // routing to build for these until one exists. Always demo.
-  async confirmPutAwayItem(...args) { return this._demo.confirmPutAwayItem(...args); }
   async validatePutAwayBin(...args) { return this._demo.validatePutAwayBin(...args); }
   async suggestPutAwayBin(...args) { return this._demo.suggestPutAwayBin(...args); }
   async checkPutAwayBin(...args) { return this._demo.checkPutAwayBin(...args); }

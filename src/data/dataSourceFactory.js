@@ -31,10 +31,13 @@ if (config.dataSource === 'businessCentral') {
   logger.info('Data source: Business Central');
   dataSource = new BusinessCentralDataSource(config.businessCentral);
 } else if (config.dataSource === 'hybrid') {
-  logger.info(`Data source: hybrid (Put Away reads: ${config.putAwayReadSource})`);
+  logger.info(
+    `Data source: hybrid (Put Away reads: ${config.putAwayReadSource}, Put Away confirm: ${config.putAwayConfirmSource})`,
+  );
   dataSource = new HybridDataSource({
     businessCentralConfig: config.businessCentral,
     putAwayReadSource: config.putAwayReadSource,
+    putAwayConfirmSource: config.putAwayConfirmSource,
   });
 } else {
   logger.info('Data source: demo (in-memory)');

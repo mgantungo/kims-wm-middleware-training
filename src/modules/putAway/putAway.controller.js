@@ -13,7 +13,7 @@ async function getDocument(req, res) {
 }
 
 async function confirmItem(req, res) {
-  const { docId, sku, location, qty, scanLog } = req.body || {};
+  const { docId, sku, location, qty, scanLog, bcPutAwayId, bcLineId } = req.body || {};
   if (!docId || !sku || !location || qty == null) {
     throw ApiError.badRequest('docId, sku, location, and qty are required.');
   }
@@ -21,7 +21,14 @@ async function confirmItem(req, res) {
   // ({ sequence, scannedAt }[]) behind `qty`, for audit purposes. Its
   // absence (older app builds, or a line confirmed without unit-by-unit
   // scanning) doesn't affect the existing confirm behaviour.
-  const result = await dataSource.confirmPutAwayItem({ docId, sku, location, qty, scanLog });
+  //
+  // bcPutAwayId/bcLineId are also optional and additive — present only
+  // when this line was originally read from Business Central (see
+  // businessCentralDataSource.js's _mapPutAway). The demo adapter ignores
+  // them entirely; the Business Central adapter requires them to address
+  // its PATCH endpoint and throws a clear error if they're missing rather
+  // than confirming against the wrong line.
+  const result = await dataSource.confirmPutAwayItem({ docId, sku, location, qty, scanLog, bcPutAwayId, bcLineId });
   res.status(201).json(result);
 }
 
@@ -70,4 +77,18 @@ async function checkBin(req, res) {
   res.status(200).json(result);
 }
 
-module.exports = { listDocuments, getDocument, confirmItem, validateBin, suggestBin, checkBin };
+async function register(req, res) {
+  const { docId, bcPutAwayId } = req.body || {};
+  if (!docId || !bcPutAwayId) {
+    throw ApiError.badRequest('docId and bcPutAwayId are required.');
+  }
+  // Replayed from the sync outbox (see PutAwayRepository's
+  // putAwayRegister handler) — unlike confirmItem's own outbox entries,
+  // there's no operator standing here waiting on this specific call, so
+  // it genuinely benefits from offline resilience rather than needing a
+  // live/blocking round trip.
+  const result = await dataSource.registerPutAway({ docId, bcPutAwayId });
+  res.status(200).json(result);
+}
+
+module.exports = { listDocuments, getDocument, confirmItem, validateBin, suggestBin, checkBin, register };
