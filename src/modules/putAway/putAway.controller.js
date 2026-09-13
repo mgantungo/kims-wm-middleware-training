@@ -1,14 +1,21 @@
 // src/modules/putAway/putAway.controller.js
 const dataSource = require('../../data/dataSourceFactory');
 const ApiError = require('../../utils/apiError');
+const { assertVisible, filterByLocation } = require('../../utils/locationAccess');
 
 async function listDocuments(req, res) {
   const result = await dataSource.getPutAwayDocuments();
-  res.json(result);
+  res.json({ ...result, documents: filterByLocation(result.documents, req, (doc) => doc.locationCode) });
 }
 
 async function getDocument(req, res) {
   const doc = await dataSource.getPutAwayDocument(req.params.docId);
+  assertVisible(doc && doc.locationCode, req, () => {
+    // notFound, not forbidden — an operator outside this document's
+    // location shouldn't be able to tell from the response whether it
+    // exists at all, just that they can't reach it.
+    throw ApiError.notFound(`Put-away document "${req.params.docId}" was not found.`);
+  });
   res.json(doc);
 }
 

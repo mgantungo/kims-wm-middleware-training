@@ -1,6 +1,7 @@
 // src/modules/inquiry/inquiry.controller.js
 const dataSource = require('../../data/dataSourceFactory');
 const ApiError = require('../../utils/apiError');
+const { assertVisible } = require('../../utils/locationAccess');
 
 async function item(req, res) {
   const q = req.query.q;
@@ -13,11 +14,26 @@ async function bin(req, res) {
   const code = req.query.code;
   if (!code) throw ApiError.badRequest('Query parameter "code" is required.');
   const result = await dataSource.searchBin(code);
+  // result.location (not .locationCode — see locationAccess.js's doc on
+  // why searchBin and listBins use different field names for the same
+  // concept). notFound, not forbidden — same reasoning as
+  // putAway.controller.js's getDocument: an operator outside this bin's
+  // location shouldn't learn from the response that it exists elsewhere.
+  assertVisible(result.location, req, () => {
+    throw ApiError.notFound(`Bin "${code}" is not recognized.`);
+  });
   res.json(result);
 }
 
 async function bins(req, res) {
-  const locationCode = req.query.locationCode;
+  // The operator's own verified location always wins over whatever the
+  // client asked for — a client-supplied locationCode is a convenience
+  // for narrowing results, never a way to reach another location's bins.
+  // Only falls back to the client's requested value (or none, i.e.
+  // unfiltered) when the operator has no locationCode of their own yet —
+  // the same backward-compatible gap every other location check in this
+  // app allows, not a bypass.
+  const locationCode = (req.user && req.user.locationCode) || req.query.locationCode;
   const result = await dataSource.listBins(locationCode);
   res.json(result);
 }
