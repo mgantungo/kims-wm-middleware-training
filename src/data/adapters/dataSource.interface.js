@@ -82,12 +82,15 @@
  *   (PutAwayLineItem.location is null): the operator scans a bin before
  *   any actual UNITS are scanned, but the app already knows which LINE
  *   it's assigning a bin for at that point, so sku IS available here.
- *   Deliberately simpler than validatePutAwayBin though — no qty is
- *   known/relevant yet, so this never checks CAPACITY, only whether the
- *   bin's occupant (if any) is unrelated to sku: empty -> accepted,
- *   occupied by the SAME sku -> accepted (a legitimate top-up), occupied
- *   by a DIFFERENT sku -> rejected. MOCKED in demoDataSource.js pending a
- *   real Business Central bin/location lookup.
+ *   demoDataSource.js's in-memory registry tracks occupantSku, so its
+ *   version can distinguish empty (accepted), occupied by the SAME sku
+ *   (accepted — a legitimate top-up), and occupied by a DIFFERENT sku
+ *   (rejected). businessCentralDataSource.js's version is built on the
+ *   SAME GET /Bins?$filter=binCode lookup searchBin uses — real Business
+ *   Central data only exposes isEmpty as a boolean, never what's
+ *   actually occupying a non-empty bin, so it can only answer "empty"
+ *   (accepted) or "not empty" (rejected, without saying by what). sku is
+ *   accepted for signature parity but genuinely unused on that path.
  * registerPutAway(payload)               -> { ok: true }
  *   payload: { docId, bcPutAwayId }
  *   Whole-document "Register" event — maps onto Business Central's POST

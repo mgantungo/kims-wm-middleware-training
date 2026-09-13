@@ -52,6 +52,21 @@ if (!['demo', 'businessCentral'].includes(PUT_AWAY_CONFIRM_SOURCE)) {
   throw new Error(`PUT_AWAY_CONFIRM_SOURCE must be "demo" or "businessCentral", got "${PUT_AWAY_CONFIRM_SOURCE}"`);
 }
 
+// Routing for validatePutAwayBin/suggestPutAwayBin (Stop & Split's
+// capacity check) — kept as its own flag, independently switchable from
+// read/confirm above. Setting this to businessCentral today has NO
+// effect: businessCentralDataSource.js's implementations of both are
+// still _notImplemented(), since the documented /Bins endpoint has no
+// capacity field to check against. This flag exists now specifically so
+// that once someone implements them for real (Business Central exposes
+// a capacity-aware endpoint), flipping this single value is the ONLY
+// remaining step — no further code change needed in hybridDataSource.js
+// or anywhere else.
+const PUT_AWAY_SPLIT_SOURCE = process.env.PUT_AWAY_SPLIT_SOURCE || 'demo';
+if (!['demo', 'businessCentral'].includes(PUT_AWAY_SPLIT_SOURCE)) {
+  throw new Error(`PUT_AWAY_SPLIT_SOURCE must be "demo" or "businessCentral", got "${PUT_AWAY_SPLIT_SOURCE}"`);
+}
+
 // Bin Inquiry is its own module, independent of Put Away entirely — not
 // tied to PUT_AWAY_READ_SOURCE/PUT_AWAY_CONFIRM_SOURCE above. Read-only,
 // so there's no separate "confirm" side to this one. See
@@ -82,6 +97,7 @@ const businessCentralInUse =
   (DATA_SOURCE === 'hybrid' &&
     (PUT_AWAY_READ_SOURCE === 'businessCentral' ||
       PUT_AWAY_CONFIRM_SOURCE === 'businessCentral' ||
+      PUT_AWAY_SPLIT_SOURCE === 'businessCentral' ||
       BIN_INQUIRY_SOURCE === 'businessCentral'));
 
 if (businessCentralInUse) {
@@ -91,7 +107,8 @@ if (businessCentralInUse) {
   if (missing.length > 0) {
     const hybridDetail =
       DATA_SOURCE === 'hybrid'
-        ? `, PUT_AWAY_READ_SOURCE=${PUT_AWAY_READ_SOURCE}, PUT_AWAY_CONFIRM_SOURCE=${PUT_AWAY_CONFIRM_SOURCE}, BIN_INQUIRY_SOURCE=${BIN_INQUIRY_SOURCE}`
+        ? `, PUT_AWAY_READ_SOURCE=${PUT_AWAY_READ_SOURCE}, PUT_AWAY_CONFIRM_SOURCE=${PUT_AWAY_CONFIRM_SOURCE}, ` +
+          `PUT_AWAY_SPLIT_SOURCE=${PUT_AWAY_SPLIT_SOURCE}, BIN_INQUIRY_SOURCE=${BIN_INQUIRY_SOURCE}`
         : '';
     throw new Error(
       `Business Central is in use (DATA_SOURCE=${DATA_SOURCE}${hybridDetail}) ` +
@@ -106,6 +123,7 @@ module.exports = {
   dataSource: DATA_SOURCE,
   putAwayReadSource: PUT_AWAY_READ_SOURCE,
   putAwayConfirmSource: PUT_AWAY_CONFIRM_SOURCE,
+  putAwaySplitSource: PUT_AWAY_SPLIT_SOURCE,
   binInquirySource: BIN_INQUIRY_SOURCE,
   jwt: {
     secret: required('JWT_SECRET'),

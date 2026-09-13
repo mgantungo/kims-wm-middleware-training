@@ -33,12 +33,13 @@ if (config.dataSource === 'businessCentral') {
 } else if (config.dataSource === 'hybrid') {
   logger.info(
     `Data source: hybrid (Put Away reads: ${config.putAwayReadSource}, Put Away confirm: ${config.putAwayConfirmSource}, ` +
-      `Bin Inquiry: ${config.binInquirySource})`,
+      `Put Away split: ${config.putAwaySplitSource}, Bin Inquiry: ${config.binInquirySource})`,
   );
   dataSource = new HybridDataSource({
     businessCentralConfig: config.businessCentral,
     putAwayReadSource: config.putAwayReadSource,
     putAwayConfirmSource: config.putAwayConfirmSource,
+    putAwaySplitSource: config.putAwaySplitSource,
     binInquirySource: config.binInquirySource,
   });
 } else {

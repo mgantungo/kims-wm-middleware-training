@@ -7,17 +7,21 @@ const ApiError = require('../../utils/apiError');
  * .env is the *only* change needed to switch — no route or controller code
  * changes.
  *
- * CURRENT SCOPE (per product decision, 2026-09): only the Put Away READ
- * path is implemented against real Business Central data —
- * getPutAwayDocuments/getPutAwayDocument. Every other method, including
- * confirmPutAwayItem/validatePutAwayBin/suggestPutAwayBin/checkPutAwayBin,
- * is still `_notImplemented()`. This isn't an oversight: the KIMS-WM API
- * Endpoint Reference doc (v1, 2026-09-07) only documents GET endpoints —
- * there is no write-back endpoint for confirming a put-away, and no
- * capacity field on the Bins endpoint for a real validate/suggest. Those
- * stay mocked (DATA_SOURCE=demo) until a write-capable endpoint is
- * documented — deliberately NOT downgraded to a weaker "best effort"
- * implementation against data that can't actually support them.
+ * CURRENT SCOPE (last updated 2026-09): implemented against real Business
+ * Central data — getPutAwayDocuments/getPutAwayDocument (read),
+ * confirmPutAwayItem (Section 2.5's PATCH), registerPutAway (Section
+ * 2.6's Register action), searchBin/listBins (Section 2.2's GET /Bins),
+ * and checkPutAwayBin (built on the SAME GET /Bins lookup searchBin
+ * uses — see checkPutAwayBin's own doc for exactly what that can and
+ * can't answer compared to the mocked demo version).
+ *
+ * Still `_notImplemented()`: validatePutAwayBin/suggestPutAwayBin. Not an
+ * oversight — the documented /Bins endpoint has no capacity field, so
+ * there's no way to answer "does this bin have room for N units" against
+ * real data, only "is it empty." Those stay mocked (DATA_SOURCE=demo)
+ * until a capacity-aware endpoint is documented — deliberately NOT
+ * downgraded to a weaker "best effort" implementation against data that
+ * can't actually support them.
  *
  * Auth is HTTP Basic (username + Business Central Web Service Access Key),
  * not OAuth2 — see _bcGet below.
@@ -341,7 +345,6 @@ class BusinessCentralDataSource {
 
   async validatePutAwayBin() { return this._notImplemented('validatePutAwayBin'); }
   async suggestPutAwayBin() { return this._notImplemented('suggestPutAwayBin'); }
-  async checkPutAwayBin() { return this._notImplemented('checkPutAwayBin'); }
   async getPickDocuments() { return this._notImplemented('getPickDocuments'); }
   async getPickDocument() { return this._notImplemented('getPickDocument'); }
   async confirmPickItem() { return this._notImplemented('confirmPickItem'); }
@@ -371,11 +374,20 @@ class BusinessCentralDataSource {
   /// nothing currently reading those specific fields breaks — the extra
   /// fields below (binDescription, binTypeCode, zoneCode, isEmpty) are
   /// purely additive.
+  /// Shared by searchBin and checkPutAwayBin below — both need "find the
+  /// one bin matching this code," they just react differently when
+  /// nothing matches (searchBin throws notFound; checkPutAwayBin returns
+  /// a soft { available: false }). Returns the raw Business Central bin
+  /// object, or null if nothing matched.
+  async _fetchBinByCode(binCode) {
+    const escaped = String(binCode || '').trim().replace(/'/g, "''");
+    const data = await this._bcGet(`Bins?$filter=binCode eq '${escaped}'`);
+    return (data.value || [])[0] || null;
+  }
+
   async searchBin(binCode) {
     if (!binCode) throw ApiError.badRequest('binCode is required.');
-    const escaped = String(binCode).replace(/'/g, "''");
-    const data = await this._bcGet(`Bins?$filter=binCode eq '${escaped}'`);
-    const bin = (data.value || [])[0];
+    const bin = await this._fetchBinByCode(binCode);
     if (!bin) throw ApiError.notFound(`Bin "${binCode}" is not recognized.`);
 
     return {
@@ -392,6 +404,36 @@ class BusinessCentralDataSource {
       zoneCode: bin.zoneCode,
       isEmpty: bin.isEmpty,
     };
+  }
+
+  /// Section 2.2 has no endpoint dedicated to "is this bin available for
+  /// a specific sku" — this reuses the EXACT same GET /Bins?$filter
+  /// lookup searchBin uses above (via _fetchBinByCode), since that's the
+  /// only real capability Business Central actually exposes here. This
+  /// is a genuine, if reduced, capability — NOT the same behavior as
+  /// demoDataSource.js's version: demo's in-memory registry tracks
+  /// occupantSku, so it can distinguish "empty," "occupied by the SAME
+  /// sku" (accepted — a legitimate top-up), and "occupied by a
+  /// DIFFERENT sku" (rejected). Real Business Central /Bins exposes
+  /// isEmpty as a boolean only — never what's actually occupying a
+  /// non-empty bin — so sku is accepted here for signature parity with
+  /// the demo adapter but genuinely unused: this can only ever answer
+  /// "empty" (accepted) or "not empty" (rejected, without being able to
+  /// say by what). An honest reduction of what the mocked version could
+  /// do, not a bug — see this class's own doc for why validatePutAwayBin/
+  /// suggestPutAwayBin have the identical gap for the same reason.
+  async checkPutAwayBin(payload) {
+    const { binCode } = payload || {};
+    if (!binCode) throw ApiError.badRequest('binCode is required.');
+    const bin = await this._fetchBinByCode(binCode);
+
+    if (!bin) {
+      return { available: false, reason: `Bin "${binCode}" is not recognized.` };
+    }
+    if (!bin.isEmpty) {
+      return { available: false, reason: `Bin ${bin.binCode} is already occupied.` };
+    }
+    return { available: true };
   }
 
   /// Lists every bin from Section 2.2 (GET /Bins), unfiltered — the

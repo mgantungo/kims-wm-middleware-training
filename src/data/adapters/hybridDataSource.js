@@ -27,11 +27,19 @@ const BusinessCentralDataSource = require('./businessCentralDataSource');
  * adapter.
  */
 class HybridDataSource {
-  constructor({ businessCentralConfig, putAwayReadSource, putAwayConfirmSource, binInquirySource }) {
+  constructor({ businessCentralConfig, putAwayReadSource, putAwayConfirmSource, putAwaySplitSource, binInquirySource }) {
     this._demo = demoDataSource;
     this._bc = new BusinessCentralDataSource(businessCentralConfig);
     this._putAwayReadSource = putAwayReadSource; // 'demo' | 'businessCentral'
     this._putAwayConfirmSource = putAwayConfirmSource; // 'demo' | 'businessCentral'
+    // Routing is wired up now even though businessCentralDataSource.js's
+    // validatePutAwayBin/suggestPutAwayBin are still _notImplemented() —
+    // see this class's constructor doc for why: the day someone
+    // implements them for real (once Business Central exposes a
+    // capacity-aware endpoint), flipping this one flag should be the
+    // ONLY remaining step. No hybridDataSource.js change needed at that
+    // point, since the plumbing is already here waiting.
+    this._putAwaySplitSource = putAwaySplitSource; // 'demo' | 'businessCentral'
     this._binInquirySource = binInquirySource; // 'demo' | 'businessCentral'
   }
 
@@ -41,6 +49,10 @@ class HybridDataSource {
 
   _putAwayConfirmTarget() {
     return this._putAwayConfirmSource === 'businessCentral' ? this._bc : this._demo;
+  }
+
+  _putAwaySplitTarget() {
+    return this._putAwaySplitSource === 'businessCentral' ? this._bc : this._demo;
   }
 
   _binInquiryTarget() {
@@ -76,12 +88,30 @@ class HybridDataSource {
     return this._putAwayConfirmTarget().registerPutAway(...args);
   }
 
-  // validate-bin/suggest-bin/check-bin have no Business Central
-  // counterpart yet (see businessCentralDataSource.js's class doc) — no
-  // routing to build for these until one exists. Always demo.
-  async validatePutAwayBin(...args) { return this._demo.validatePutAwayBin(...args); }
-  async suggestPutAwayBin(...args) { return this._demo.suggestPutAwayBin(...args); }
-  async checkPutAwayBin(...args) { return this._demo.checkPutAwayBin(...args); }
+  // validate-bin/suggest-bin still have no REAL Business Central
+  // implementation (see businessCentralDataSource.js's class doc — no
+  // capacity field on /Bins), so this always resolves to demo in
+  // practice today regardless of PUT_AWAY_SPLIT_SOURCE's value — but the
+  // routing itself is real and ready for the day that changes.
+  async validatePutAwayBin(...args) {
+    return this._putAwaySplitTarget().validatePutAwayBin(...args);
+  }
+
+  async suggestPutAwayBin(...args) {
+    return this._putAwaySplitTarget().suggestPutAwayBin(...args);
+  }
+
+  /// check-bin is now built on the SAME GET /Bins lookup Bin Inquiry
+  /// already uses (see businessCentralDataSource.js's checkPutAwayBin
+  /// doc) — routed through BIN_INQUIRY_SOURCE, not a new flag of its
+  /// own, since it's genuinely the same underlying Business Central
+  /// capability as searchBin/listBins, not a Put Away write. A
+  /// deployment that's already confirmed Bin Inquiry works against real
+  /// data gets this for free, without needing to separately configure
+  /// and verify it.
+  async checkPutAwayBin(...args) {
+    return this._binInquiryTarget().checkPutAwayBin(...args);
+  }
 
   // ---------------- Everything else — always demo until its own phase ----------------
   async getPickDocuments(...args) { return this._demo.getPickDocuments(...args); }
