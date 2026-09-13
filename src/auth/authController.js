@@ -26,8 +26,26 @@ async function login(req, res, next) {
       throw ApiError.unauthorized('Invalid username or password.');
     }
 
-    const token = issueToken({ username: user.username, environment: config.env, role: user.role });
-    res.json({ token, username: user.username, environment: config.env, role: user.role });
+    const token = issueToken({
+      username: user.username,
+      environment: config.env,
+      role: user.role,
+      // Which Business Central warehouse LOCATION this operator is
+      // restricted to (e.g. "3PL-WH-BKL") — see WHEmps in the KIMS-WM
+      // API doc for where this concept comes from on the Business
+      // Central side. Add it to each entry in the local user store
+      // (users.json) directly; there's no per-request lookup here, since
+      // Business Central login was explicitly ruled out — the operator
+      // directory stays local, only this one extra field is new.
+      locationCode: user.locationCode,
+    });
+    res.json({
+      token,
+      username: user.username,
+      environment: config.env,
+      role: user.role,
+      locationCode: user.locationCode,
+    });
   } catch (err) {
     next(err);
   }

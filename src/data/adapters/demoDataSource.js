@@ -1,4 +1,5 @@
 // src/data/adapters/demoDataSource.js
+// src/data/adapters/demoDataSource.js
 const ApiError = require('../../utils/apiError');
 
 /**
@@ -215,6 +216,10 @@ class DemoDataSource {
   /// valid destination. No reservation happens here either way — the
   /// bin's actual occupancy only changes once the operator scans real
   /// items into it and that gets confirmed, same as any other line.
+  /// locationCode is accepted for signature parity with
+  /// businessCentralDataSource.js's version (which genuinely needs it —
+  /// see that method's doc for why) but ignored here — the demo bin
+  /// registry has no location concept at all, same as listBins above.
   async checkPutAwayBin(payload) {
     const { binCode, sku } = payload || {};
     const normalizedBin = String(binCode || '').trim().toUpperCase();

@@ -20,7 +20,21 @@ function requireAuth(req, res, next) {
 
   try {
     const payload = jwt.verify(token, config.jwt.secret);
-    req.user = { username: payload.sub, environment: payload.env, role: payload.role };
+    req.user = {
+      username: payload.sub,
+      environment: payload.env,
+      role: payload.role,
+      // Which BC location this operator is restricted to — see
+      // jwtService.js's issueToken. Every route handler that needs to
+      // enforce "only bins/zones/documents belonging to MY location" (Bin
+      // Inquiry, Put Away, and eventually Transfer/Quarantine) should
+      // read this off req.user, NOT trust a client-supplied locationCode
+      // query/body param for that purpose — a param the app sends can be
+      // omitted or altered; a claim verified here cannot. Enforcement
+      // itself isn't wired into any route yet — this is the plumbing
+      // that makes doing so possible next, not the enforcement.
+      locationCode: payload.loc,
+    };
     next();
   } catch (err) {
     next(ApiError.unauthorized('Your session has expired. Please log in again.'));

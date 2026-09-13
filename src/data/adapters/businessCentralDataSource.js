@@ -245,6 +245,16 @@ class BusinessCentralDataSource {
       // address PATCH .../putAways(bcPutAwayId)/putAwayLines(...) for
       // every line on this document.
       bcPutAwayId: bc.id,
+      // Which BC warehouse location this put-away belongs to (Section
+      // 2.4's header field). Never captured before this fix — that gap
+      // is exactly what let checkPutAwayBin return a false "available"
+      // for a bin that only existed in a DIFFERENT location's Bin table:
+      // GET /Bins?$filter=binCode eq 'X' with no location scoping can
+      // match a same-named bin anywhere, but the actual PATCH .../
+      // putAwayLines call validates the bin against the LINE's real
+      // location and correctly rejects it if it's not there. See
+      // checkPutAwayBin's own doc for the fix.
+      locationCode: bc.locationCode,
       // ASSUMPTION: no field in the documented schema maps cleanly to
       // this. Using the first Take line's SourceDoc (e.g. "Inbound
       // Transfer") as the closest available descriptor, falling back to
@@ -369,22 +379,42 @@ class BusinessCentralDataSource {
   /// adapter's items array (with real sku/batch/units) has no Business
   /// Central equivalent to source it from.
   ///
-  /// Every field the demo adapter returns (binCode, location, isActive,
-  /// items, lastSyncedAt) is still present here with the same meaning, so
-  /// nothing currently reading those specific fields breaks — the extra
-  /// fields below (binDescription, binTypeCode, zoneCode, isEmpty) are
-  /// purely additive.
   /// Shared by searchBin and checkPutAwayBin below — both need "find the
   /// one bin matching this code," they just react differently when
   /// nothing matches (searchBin throws notFound; checkPutAwayBin returns
   /// a soft { available: false }). Returns the raw Business Central bin
   /// object, or null if nothing matched.
-  async _fetchBinByCode(binCode) {
-    const escaped = String(binCode || '').trim().replace(/'/g, "''");
-    const data = await this._bcGet(`Bins?$filter=binCode eq '${escaped}'`);
+  ///
+  /// [locationCode] is OPTIONAL and scopes the match to that location
+  /// when given — searchBin (a general lookup by code, no location
+  /// context) doesn't pass one; checkPutAwayBin (gating a specific
+  /// document/line's bin assignment) does, and MUST: GET
+  /// /Bins?$filter=binCode eq 'X' alone can match a same-named bin in a
+  /// completely different BC location, which would come back "found" and
+  /// "available" here but then fail Business Central's own PATCH .../
+  /// putAwayLines validation (Internal_InvalidTableRelation) once
+  /// confirmed, since that call validates the bin against the LINE's
+  /// real location, not just the code in isolation.
+  async _fetchBinByCode(binCode, locationCode) {
+    const escapedBin = String(binCode || '').trim().replace(/'/g, "''");
+    let filter = `binCode eq '${escapedBin}'`;
+    if (locationCode) {
+      const escapedLoc = String(locationCode).trim().replace(/'/g, "''");
+      filter += ` and locationCode eq '${escapedLoc}'`;
+    }
+    const data = await this._bcGet(`Bins?$filter=${filter}`);
     return (data.value || [])[0] || null;
   }
 
+  /// Every field the demo adapter returns (binCode, location, isActive,
+  /// items, lastSyncedAt) is still present here with the same meaning, so
+  /// nothing currently reading those specific fields breaks — the extra
+  /// fields below (binDescription, binTypeCode, zoneCode, isEmpty) are
+  /// purely additive. Deliberately NOT location-scoped (see
+  /// _fetchBinByCode's doc) — this is a general "look this code up
+  /// anywhere" inquiry, not a gate on a specific document's bin
+  /// assignment, so a same-named bin existing in more than one location
+  /// isn't a correctness problem here the way it is for checkPutAwayBin.
   async searchBin(binCode) {
     if (!binCode) throw ApiError.badRequest('binCode is required.');
     const bin = await this._fetchBinByCode(binCode);
@@ -422,10 +452,16 @@ class BusinessCentralDataSource {
   /// say by what). An honest reduction of what the mocked version could
   /// do, not a bug — see this class's own doc for why validatePutAwayBin/
   /// suggestPutAwayBin have the identical gap for the same reason.
+  ///
+  /// [locationCode], when given, is passed straight to _fetchBinByCode —
+  /// see that method's doc for why this one, unlike searchBin, genuinely
+  /// needs it: a bin code that exists in a different BC location must be
+  /// treated as NOT FOUND here, not "found and available," since it
+  /// isn't valid for the document/line this check is actually gating.
   async checkPutAwayBin(payload) {
-    const { binCode } = payload || {};
+    const { binCode, locationCode } = payload || {};
     if (!binCode) throw ApiError.badRequest('binCode is required.');
-    const bin = await this._fetchBinByCode(binCode);
+    const bin = await this._fetchBinByCode(binCode, locationCode);
 
     if (!bin) {
       return { available: false, reason: `Bin "${binCode}" is not recognized.` };

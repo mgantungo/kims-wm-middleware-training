@@ -61,7 +61,7 @@ async function suggestBin(req, res) {
 }
 
 async function checkBin(req, res) {
-  const { binCode, sku } = req.body || {};
+  const { binCode, sku, locationCode } = req.body || {};
   if (!binCode || !sku) {
     throw ApiError.badRequest('binCode and sku are required.');
   }
@@ -72,8 +72,12 @@ async function checkBin(req, res) {
   // though no units have been scanned yet — the app already knows which
   // LINE it's assigning a bin for, and the middleware needs it to tell
   // "empty or already holds this same item" apart from "holds something
-  // unrelated."
-  const result = await dataSource.checkPutAwayBin({ binCode, sku });
+  // unrelated." locationCode is optional but important against real
+  // Business Central data — without it, a same-named bin in a different
+  // BC location can come back "available" here and then fail Business
+  // Central's own PATCH .../putAwayLines validation once actually
+  // confirmed. See businessCentralDataSource.js's checkPutAwayBin.
+  const result = await dataSource.checkPutAwayBin({ binCode, sku, locationCode });
   res.status(200).json(result);
 }
 
