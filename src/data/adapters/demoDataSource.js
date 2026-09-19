@@ -101,6 +101,42 @@ class DemoDataSource {
     return { ok: true };
   }
 
+  /// Demo counterpart to businessCentralDataSource.js's confirmPutAwayBatch
+  /// — same entry shape ([{ sku, bcLineId, location, qty, scanLog? }]),
+  /// but addresses each entry by sku (demo items have no real bcLineId)
+  /// rather than by bcLineId. Applies each entry the same way
+  /// confirmPutAwayItem already does, in order, so a document confirmed
+  /// via the batch path ends up in an identical local state to one
+  /// confirmed line-by-line — demo mode doesn't have Business Central's
+  /// all-or-nothing rollback behavior to emulate (there's no real network
+  /// call to fail partway through), so every entry here always succeeds.
+  async confirmPutAwayBatch(payload) {
+    const { docId, entries } = payload || {};
+    const doc = this._putAwayDocs[docId];
+    if (!doc) throw ApiError.notFound(`Put away document "${docId}" not found.`);
+    if (!Array.isArray(entries) || entries.length === 0) {
+      throw ApiError.badRequest('confirmPutAwayBatch requires at least one entry.');
+    }
+
+    doc._confirmed = doc._confirmed || new Set();
+    doc._scanLogs = doc._scanLogs || {};
+
+    for (const entry of entries) {
+      const item = doc.items.find((i) => i.sku === entry.sku);
+      if (!item) throw ApiError.badRequest(`Item "${entry.sku}" is not part of document "${docId}".`);
+      doc._confirmed.add(entry.sku);
+      if (Array.isArray(entry.scanLog)) {
+        // Later entries for the SAME sku (a serial-tracked line split
+        // across many single-unit entries) extend the log rather than
+        // overwrite it, so the full per-unit history survives even
+        // though each entry only carries its own slice.
+        doc._scanLogs[entry.sku] = [...(doc._scanLogs[entry.sku] || []), ...entry.scanLog];
+      }
+    }
+    doc.status = doc._confirmed.size >= doc.items.length ? 'complete' : 'inProgress';
+    return { ok: true };
+  }
+
   async validatePutAwayBin(payload) {
     const { docId, binCode, sku, qty } = payload || {};
     if (!docId || !binCode || !sku || qty == null) {

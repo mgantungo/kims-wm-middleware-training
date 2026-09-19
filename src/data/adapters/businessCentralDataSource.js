@@ -1,5 +1,6 @@
 // src/data/adapters/businessCentralDataSource.js
 const ApiError = require('../../utils/apiError');
+const logger = require('../../logging/logger');
 
 /**
  * Implements the exact same method surface as DemoDataSource (see
@@ -210,13 +211,31 @@ class BusinessCentralDataSource {
       // on the floor. Mapping it straight to null is what makes that
       // existing flow apply to real BC data with no extra logic.
       location: line.binCode && line.binCode.trim() ? line.binCode : null,
-      // ASSUMPTION: the API doc has no equivalent of this app-level
-      // flag. Defaults to true (scan-based counting) for every line
-      // until/unless Business Central exposes something to derive it
-      // from — e.g. the items endpoint's has_serials/has_batches could
-      // be a signal for a future pass, but isn't wired up here since
-      // that would mean a second BC call per line.
-      scannable: true,
+      // Previously hardcoded true — the original API doc had no
+      // equivalent field. The v2 update added isScannable directly on
+      // the line, so this now reads real data instead of assuming every
+      // item can be barcode-scanned. Per product decision, some items
+      // (e.g. electricity poles stored in an open floor space, tagged
+      // only with a wall plate) have no barcode reference configured in
+      // BC at all — isScannable false for those, driving the manual
+      // bin+SKU+quantity entry path instead of the scan loop.
+      scannable: line.isScannable !== false,
+      // New in the v2 doc update — drives which scan mode the app uses
+      // for this line. isSerialTracked: each physical unit must be
+      // scanned individually and the operator can never bulk-count it
+      // (a serial can't be "entered as a quantity"); isLotTracked: the
+      // existing scan-and-count behavior, unchanged. Neither field
+      // implies the other — an item can in principle be untracked,
+      // lot-tracked, or serial-tracked, never more than one at once per
+      // the doc's description.
+      isSerialTracked: line.isSerialTracked === true,
+      isLotTracked: line.isLotTracked === true,
+      // Only ever populated by Business Central itself on a line that's
+      // ALREADY been handled and read back — never something the app
+      // sends. Local serial capture during scanning is tracked
+      // separately (see scan_log_entries), not through this field.
+      lotNo: line.lotNo || null,
+      serialNo: line.serialNo || null,
       // Business Central's own line GUID — required to address PATCH
       // .../putAwayLines(bcLineId) when this line is confirmed (Section
       // 2.5). The app carries this through untouched even across a
@@ -270,6 +289,17 @@ class BusinessCentralDataSource {
 
   async getPutAwayDocuments() {
     const data = await this._bcGet('putAways?$expand=putAwayLines');
+    // TEMPORARY diagnostic aid — logs the exact, unmapped response
+    // Business Central sent, before _mapPutAway touches any of it. Added
+    // specifically to verify the v2 doc's new putAwayLines fields
+    // (isSerialTracked, isLotTracked, lotNo, serialNo, isScannable)
+    // against real data rather than trusting the doc's wording — see the
+    // isScannable "effectively always true" discrepancy raised earlier
+    // in this project. Worth removing (or dropping to logger.debug) once
+    // that's confirmed; this is meant to be watched in the console
+    // during verification, not to run at info level in production
+    // indefinitely.
+    logger.info({ rawBcResponse: data }, 'Raw Business Central response — GET putAways?$expand=putAwayLines');
     return { documents: (data.value || []).map((d) => this._mapPutAway(d)) };
   }
 
@@ -281,6 +311,8 @@ class BusinessCentralDataSource {
     // does.
     const escaped = String(docId).replace(/'/g, "''");
     const data = await this._bcGet(`putAways?$expand=putAwayLines&$filter=no eq '${escaped}'`);
+    // Same temporary diagnostic as getPutAwayDocuments above.
+    logger.info({ docId, rawBcResponse: data }, 'Raw Business Central response — GET putAways (single document)');
     const match = (data.value || [])[0];
     if (!match) throw ApiError.notFound(`Put away document "${docId}" not found.`);
     return this._mapPutAway(match);
@@ -332,6 +364,80 @@ class BusinessCentralDataSource {
     });
 
     return { ok: true, bcLine: updatedLine };
+  }
+
+  /// Maps onto Section 2.7, "Update Put-Away Lines — Batch Scan" — POST
+  /// .../putAways(bcPutAwayId)/Microsoft.NAV.ProcessBatchScans. Replaces
+  /// per-line PATCH calls (confirmPutAwayItem) as the confirm path going
+  /// forward — one call per bin/document instead of one per line, per
+  /// product decision (line-per-line was resource-intensive on Business
+  /// Central and made the operator wait on N separate round trips).
+  ///
+  /// [entries] is [{ sku, bcLineId, location, qty }] — sku is unused by
+  /// this adapter (BC addresses lines by bcLineId alone) but carried on
+  /// every entry so demoDataSource.js's version of this method, which
+  /// has no real bcLineId to address by, can still work from the same
+  /// payload shape.
+  /// confirmPutAwayItem already uses per-call, just batched. The doc is
+  /// explicit that the SAME bcLineId can legitimately appear more than
+  /// once (its own example does exactly this, for a bin-change mid-line);
+  /// callers rely on that for serial-tracked lines, where every
+  /// individually-scanned unit becomes its own entry with qtyToHandle: 1
+  /// rather than one aggregated entry per line — see
+  /// PutAwayItemController's batch-building logic for why. Entries are
+  /// NOT deduplicated or merged here — sent exactly as given, in order,
+  /// since order is significant (the doc's own example shows a later
+  /// entry re-reading state left by an earlier one in the SAME call).
+  ///
+  /// scannedPayload is a JSON-encoded ARRAY passed as a STRING field, not
+  /// a nested array — an awkward but explicit requirement in the doc
+  /// (its own sample request body shows the backslash-escaped quotes).
+  /// Getting this wrong (sending a real nested array) would fail
+  /// silently or with a confusing "malformed" error rather than an
+  /// obvious type mismatch, so this is deliberately built with
+  /// JSON.stringify, not string concatenation.
+  ///
+  /// IMPORTANT — the doc is explicit that a failure here is ALL-OR-
+  /// NOTHING: even a "Processed 2, skipped 1" message means the WHOLE
+  /// call was rolled back, not that 2 entries succeeded. _bcPost already
+  /// surfaces Business Central's raw response body on a non-OK response,
+  /// which is exactly the aggregated "Entry N: <reason>" message needed
+  /// to tell the operator which entry to fix — no special-casing needed
+  /// here beyond letting that error propagate.
+  async confirmPutAwayBatch(payload) {
+    const { bcPutAwayId, entries } = payload || {};
+    if (!bcPutAwayId) {
+      throw ApiError.badRequest(
+        'confirmPutAwayBatch requires bcPutAwayId — this document was not read from Business Central, ' +
+          'so there is no put-away to confirm against.',
+      );
+    }
+    if (!Array.isArray(entries) || entries.length === 0) {
+      throw ApiError.badRequest('confirmPutAwayBatch requires at least one entry.');
+    }
+    // Field names deliberately match confirmPutAwayItem's own payload
+    // (location/qty), not Business Central's wire names (binCode/
+    // qtyToHandle) — the mapping to BC's names happens below, at the
+    // point of building scanEntries. Keeps one consistent entry shape
+    // across both confirm paths and across data sources (demoDataSource
+    // .js's version of this method addresses entries by sku instead of
+    // bcLineId, since demo data has no real BC line GUIDs — sku is
+    // carried on every entry for exactly that reason, even though this
+    // adapter itself only needs bcLineId/location/qty).
+    for (const [i, entry] of entries.entries()) {
+      if (!entry.bcLineId || !entry.location || entry.qty == null) {
+        throw ApiError.badRequest(
+          `confirmPutAwayBatch entry ${i}: bcLineId, location, and qty are all required.`,
+        );
+      }
+    }
+
+    const scanEntries = entries.map((e) => ({ id: e.bcLineId, binCode: e.location, qtyToHandle: e.qty }));
+    await this._bcPost(`putAways(${bcPutAwayId})/Microsoft.NAV.ProcessBatchScans`, {
+      scannedPayload: JSON.stringify(scanEntries),
+    });
+
+    return { ok: true };
   }
 
   /// Maps onto Section 2.6, "Register Put-Away" — POST
