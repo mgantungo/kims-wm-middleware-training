@@ -1,6 +1,6 @@
 // src/data/adapters/businessCentralDataSource.js
 const ApiError = require('../../utils/apiError');
-const logger = require('../../logging/logger');
+const logger = require('../../utils/logger');
 
 /**
  * Implements the exact same method surface as DemoDataSource (see
