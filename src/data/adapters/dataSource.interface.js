@@ -59,6 +59,42 @@
  *   accepted-scan timeline behind payload.qty, when the item was scanned
  *   unit-by-unit rather than confirmed as a single quantity. Additive only;
  *   adapters that don't care about it can ignore the field.
+ * confirmPutAwayBatch(payload)          -> { ok: true }
+ *   payload: { docId, bcPutAwayId?, entries: [{ sku, bcLineId?, location,
+ *   qty, scanLog? }] }
+ *   Maps onto Section 2.7's Microsoft.NAV.ProcessBatchScans — replaces
+ *   N separate confirmPutAwayItem calls with one call per bin/document,
+ *   per product decision (line-per-line was resource-intensive on
+ *   Business Central and made the operator wait on N round trips). Each
+ *   entry mirrors confirmPutAwayItem's own payload shape (location/qty,
+ *   not Business Central's wire names binCode/qtyToHandle — that mapping
+ *   happens inside businessCentralDataSource.js). sku is carried on
+ *   every entry even though businessCentralDataSource.js's version
+ *   doesn't need it (Business Central addresses lines by bcLineId
+ *   alone) — demoDataSource.js's version has no real bcLineId to
+ *   address by, so it uses sku instead; one entry shape works for both
+ *   adapters this way.
+ *
+ *   The SAME bcLineId can legitimately appear more than once across
+ *   entries — Section 2.7's own example does exactly this for a
+ *   bin-change mid-line, and a serial-tracked item (see
+ *   PutAwayLineItem.isSerialTracked) relies on this too: Business
+ *   Central pre-splits a serialized item into one line per physical
+ *   unit BEFORE the app ever reads it (confirmed against real data,
+ *   Sept 2026), so a serial-tracked line's entry always has qty 1 —
+ *   there is no special per-entry serial field, since Business Central
+ *   already knows which serial is on which line from receiving; the app
+ *   never sends one.
+ *
+ *   IMPORTANT: Business Central's batch action is documented as
+ *   ALL-OR-NOTHING — even a "Processed X, skipped Y" response means the
+ *   WHOLE call was rolled back, not that X entries succeeded. No
+ *   client-side pre-validation or partial-retry logic exists yet
+ *   (deferred, per product decision, to be handled after the base batch
+ *   path is working) — a rejected batch is simply retried as-is by the
+ *   sync engine's normal backoff, same as any other permanently-
+ *   rejected outbox entry, until the operator corrects whatever the
+ *   aggregated error message named and the confirm is redone.
  * validatePutAwayBin(payload)           -> { accepted: boolean, reason?: string }
  *   payload: { docId, binCode, sku, qty }
  *   Operator-scanned-candidate path — kept for a possible future manual

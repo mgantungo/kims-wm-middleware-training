@@ -77,6 +77,17 @@ class HybridDataSource {
     return this._putAwayConfirmTarget().confirmPutAwayItem(...args);
   }
 
+  /// Same routing flag as confirmPutAwayItem — the batch endpoint
+  /// (Section 2.7) is the same "writes to a live inventory system"
+  /// concern, just replacing N per-line PATCH calls with one call per
+  /// bin/document. Not a new flag: a deployment that's already verified
+  /// confirmPutAwayItem against real Business Central data doesn't need
+  /// to separately re-verify this before it's trusted — it's the same
+  /// write path, batched.
+  async confirmPutAwayBatch(...args) {
+    return this._putAwayConfirmTarget().confirmPutAwayBatch(...args);
+  }
+
   /// Same routing flag as confirmPutAwayItem, not read — Register is part
   /// of the same "writes to Business Central" lifecycle as confirming a
   /// line, fired once every line on a document is done. Keeping it on the

@@ -39,6 +39,28 @@ async function confirmItem(req, res) {
   res.status(201).json(result);
 }
 
+async function confirmBatch(req, res) {
+  const { docId, bcPutAwayId, entries } = req.body || {};
+  if (!docId || !Array.isArray(entries) || entries.length === 0) {
+    throw ApiError.badRequest('docId and a non-empty entries array are required.');
+  }
+  for (const [i, entry] of entries.entries()) {
+    if (!entry.sku || !entry.location || entry.qty == null) {
+      throw ApiError.badRequest(`entries[${i}]: sku, location, and qty are all required.`);
+    }
+  }
+  // Replaces N confirmItem calls with one call per bin/document — see
+  // dataSource.interface.js's confirmPutAwayBatch doc for the full
+  // shape, the serial-tracked qty-1-per-entry reasoning, and the
+  // all-or-nothing rollback behavior this inherits directly from
+  // Business Central's own batch action. Same optional/additive
+  // bcPutAwayId as confirmItem: demo ignores it, the Business Central
+  // adapter requires it (and requires each entry's own bcLineId) and
+  // throws a clear error rather than guessing if either is missing.
+  const result = await dataSource.confirmPutAwayBatch({ docId, bcPutAwayId, entries });
+  res.status(201).json(result);
+}
+
 async function validateBin(req, res) {
   const { docId, binCode, sku, qty } = req.body || {};
   if (!docId || !binCode || !sku || qty == null) {
@@ -102,4 +124,4 @@ async function register(req, res) {
   res.status(200).json(result);
 }
 
-module.exports = { listDocuments, getDocument, confirmItem, validateBin, suggestBin, checkBin, register };
+module.exports = { listDocuments, getDocument, confirmItem, confirmBatch, validateBin, suggestBin, checkBin, register };

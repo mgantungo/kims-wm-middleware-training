@@ -11,6 +11,9 @@ router.get('/documents', asyncHandler(controller.listDocuments));
 router.get('/documents/:docId', asyncHandler(controller.getDocument));
 // POST /put-away/confirm
 router.post('/confirm', asyncHandler(controller.confirmItem));
+// POST /put-away/confirm-batch — Section 2.7's batch scan, replacing N
+// per-line confirm calls with one call per bin/document.
+router.post('/confirm-batch', asyncHandler(controller.confirmBatch));
 // POST /put-away/validate-bin
 router.post('/validate-bin', asyncHandler(controller.validateBin));
 // POST /put-away/suggest-bin
