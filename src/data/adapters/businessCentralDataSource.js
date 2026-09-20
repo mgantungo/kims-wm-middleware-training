@@ -458,7 +458,45 @@ class BusinessCentralDataSource {
       scannedPayload: JSON.stringify(scanEntries),
     });
 
-    return { ok: true };
+    // Per product decision: every time a bin's batch is successfully
+    // pushed to Business Central, the middleware attempts to register the
+    // whole put-away right away if that batch happened to be the last
+    // thing the document needed. Deliberately AWAITED, not fire-and-
+    // forget — the operator needs to actually know whether it worked, not
+    // just have it happen silently in the background. The batch confirm
+    // itself already succeeded by this point regardless of what happens
+    // next, so a register outcome (attempted, succeeded, or failed) is
+    // reported alongside it rather than thrown — a failed or skipped
+    // register must never make the app think the bin confirm itself
+    // failed, which would risk it being retried unnecessarily.
+    const registerOutcome = await this._tryAutoRegister(bcPutAwayId);
+
+    return { ok: true, ...registerOutcome };
+  }
+
+  /// Re-reads the document fresh (not the batch-confirm response, which
+  /// carries no line detail) and reuses _mapPutAway's own status
+  /// computation — the same allDone/qtyToHandle criterion that already
+  /// decides "complete" everywhere else — so this can never drift from
+  /// what the rest of the app considers done. Returns a plain result
+  /// object rather than throwing on failure, since a failed or
+  /// not-applicable register here is information for the caller to
+  /// report, not an error in confirmPutAwayBatch's own contract.
+  async _tryAutoRegister(bcPutAwayId) {
+    const data = await this._bcGet(`putAways(${bcPutAwayId})?$expand=putAwayLines`);
+    const mapped = this._mapPutAway(data);
+    if (mapped.status !== 'complete') {
+      return { registerAttempted: false, registered: false, registerError: null };
+    }
+    logger.info({ bcPutAwayId }, 'Document complete after batch confirm — attempting auto-register');
+    try {
+      await this._bcPost(`putAways(${bcPutAwayId})/Microsoft.NAV.Register`, {});
+      logger.info({ bcPutAwayId }, 'Auto-register succeeded');
+      return { registerAttempted: true, registered: true, registerError: null };
+    } catch (error) {
+      logger.warn({ bcPutAwayId, err: error }, 'Auto-register-on-complete-bin attempt failed');
+      return { registerAttempted: true, registered: false, registerError: error.message || String(error) };
+    }
   }
 
   /// Maps onto Section 2.6, "Register Put-Away" — POST
