@@ -518,7 +518,38 @@ class BusinessCentralDataSource {
     return { ok: true };
   }
 
-  async validatePutAwayBin() { return this._notImplemented('validatePutAwayBin'); }
+  /// No dedicated "validate a bin" action exists in Business Central's
+  /// own API — confirmed against the full KIMS-WM API doc, every section
+  /// (2.1 through 2.8, Picks included). The only bin-related read is
+  /// Section 2.2 (GET /Bins), raw metadata with no validation or
+  /// recommendation semantics of its own. So this is necessarily custom
+  /// logic built on top of that raw list, not a passthrough to BC.
+  ///
+  /// Scope deliberately kept honest: checks that binCode genuinely
+  /// exists as a bin at this put-away's own location (same
+  /// location-scoping reasoning as checkPutAwayBin, and for the same
+  /// reason — a same-named bin in a DIFFERENT BC location must not read
+  /// as valid here). Does NOT check capacity/remaining room for qty —
+  /// BC's Bins endpoint has no numeric capacity field, only isEmpty, and
+  /// unlike checkPutAwayBin's case (a line BC left fully unassigned) a
+  /// split-remainder bin is explicitly allowed to already hold some of
+  /// the same item (see put_away_models.dart's BinSuggestion.isTopUp) —
+  /// so isEmpty isn't the right gate here either. The actual
+  /// batch-confirm call remains the real authority on whether Business
+  /// Central ultimately accepts the quantity.
+  async validatePutAwayBin(payload) {
+    const { docId, binCode, sku, qty } = payload || {};
+    if (!docId || !binCode || !sku || qty == null) {
+      throw ApiError.badRequest('docId, binCode, sku, and qty are required.');
+    }
+    const doc = await this.getPutAwayDocument(docId);
+    const bin = await this._fetchBinByCode(binCode, doc.locationCode);
+    if (!bin) {
+      return { accepted: false, reason: `Bin "${binCode}" is not recognized at this location.` };
+    }
+    return { accepted: true };
+  }
+
   async suggestPutAwayBin() { return this._notImplemented('suggestPutAwayBin'); }
   async getPickDocuments() { return this._notImplemented('getPickDocuments'); }
   async getPickDocument() { return this._notImplemented('getPickDocument'); }
