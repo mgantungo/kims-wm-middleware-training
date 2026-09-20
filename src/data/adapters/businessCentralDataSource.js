@@ -114,16 +114,20 @@ class BusinessCentralDataSource {
 
     if (!response.ok) {
       const responseBody = await response.text().catch(() => '');
-      // Business Central's documented business-logic errors for this
-      // endpoint (exceeding line quantity, an invalid mid-line bin
-      // change) come back as this same non-2xx shape — surfaced as-is
-      // rather than guessed at, so whoever reads the middleware log sees
-      // BC's own error text, not a generic wrapper around it.
-      throw ApiError.internal(
+      const message =
         `Business Central rejected the put-away line update (${response.status}) for ${pathAndQuery}` +
-          `${responseBody ? `: ${responseBody}` : ''}`,
-        'BC_CONFIRM_REJECTED',
-      );
+        `${responseBody ? `: ${responseBody}` : ''}`;
+      // Same fix as _bcPost's identical bug — preserve BC's own 4xx/5xx
+      // distinction instead of always wrapping as this middleware's own
+      // 500, which made a genuinely permanent BC validation rejection
+      // (exceeding line quantity, an invalid mid-line bin change) look
+      // like a transient server error to the app's SyncManager, causing
+      // it to retry the identical failing payload forever instead of
+      // marking it rejected.
+      if (response.status >= 400 && response.status < 500) {
+        throw ApiError.badRequest(message);
+      }
+      throw ApiError.internal(message, 'BC_CONFIRM_REJECTED');
     }
 
     return response.json();
@@ -166,11 +170,28 @@ class BusinessCentralDataSource {
 
     if (!response.ok) {
       const responseBody = await response.text().catch(() => '');
-      throw ApiError.internal(
+      const message =
         `Business Central rejected the action call (${response.status}) for ${pathAndQuery}` +
-          `${responseBody ? `: ${responseBody}` : ''}`,
-        'BC_ACTION_REJECTED',
-      );
+        `${responseBody ? `: ${responseBody}` : ''}`;
+      // Preserve BC's own 4xx/5xx distinction — this previously always
+      // threw ApiError.internal (mapped to this middleware's own 500)
+      // regardless of what BC actually said, so a genuine, PERMANENT
+      // validation rejection from BC (400 — "will never succeed by
+      // retrying the identical payload," e.g. "Total handled quantity
+      // exceeds the line quantity" or "Bin Code must have a value")
+      // looked identical, from the app's SyncManager's point of view, to
+      // a transient server error. SyncManager only marks an entry
+      // permanently rejected (stops retrying) for a 4xx-class
+      // ApiRequestException; a 5xx is retried with backoff forever.
+      // Confirmed real: both a batch-scan rejection and a Register
+      // rejection kept retrying every sync cycle indefinitely — the
+      // exact same failing payload, resent over and over, for a call
+      // that could never succeed without the underlying data actually
+      // changing first.
+      if (response.status >= 400 && response.status < 500) {
+        throw ApiError.badRequest(message);
+      }
+      throw ApiError.internal(message, 'BC_ACTION_REJECTED');
     }
 
     const rawText = await response.text().catch(() => '');
