@@ -222,7 +222,35 @@ class BusinessCentralDataSource {
     const firstTakeBin = takeLines.map((l) => l.binCode).find((c) => c && c.trim());
     const receivedFromLocation = firstTakeBin || 'RECEIVING';
 
-    const items = placeLines.map((line) => ({
+    // Per product decision — a real correction to what this adapter
+    // previously assumed: a Place line's OWN qtyToHandle cannot be read
+    // in isolation. Confirmed directly against real data: a brand-new,
+    // never-opened document (WHPA-000168) and a line Business Central
+    // had already pre-suggested a destination bin for but no operator
+    // had touched (WHPA-000169's A6001 line) BOTH report Place
+    // qtyToHandle: 0 — a pre-assigned bin is not evidence of real
+    // confirmation. The reliable signal is each Take/Place PAIR's own
+    // difference: Take.qtyToHandle stays pinned at the original quantity
+    // until Business Central's own internal process moves it (this app
+    // never PATCHes a Take line directly), so Take.qtyToHandle minus
+    // Place.qtyToHandle is what actually reads as "0 remaining" only
+    // once genuine work has happened, independent of whether a bin
+    // happens to already be suggested.
+    //
+    // Pairing confirmed reliable (no exceptions across every document
+    // sampled): a Place line's lineNo is always exactly its matching
+    // Take line's lineNo + 10000.
+    const takeByLineNo = new Map(takeLines.map((l) => [l.lineNo, l]));
+
+    const items = placeLines.map((line) => {
+      const takeLine = takeByLineNo.get(line.lineNo - 10000);
+      // Falls back to the Place line's own qtyToHandle if no matching
+      // Take is found — shouldn't happen against real data given the
+      // pairing above, but a document structured unexpectedly should
+      // degrade to the old behavior rather than produce a wrong number
+      // silently or throw.
+      const qtyToHandle = takeLine ? takeLine.qtyToHandle - line.qtyToHandle : line.qtyToHandle;
+      return {
       sku: line.itemNo,
       description: line.itemDesc,
       qty: line.quantity,
@@ -265,18 +293,37 @@ class BusinessCentralDataSource {
       // is exactly what triggers Business Central's OWN server-side
       // split when the second PATCH arrives with a different bin.
       bcLineId: line.id,
-    }));
+      // NEW — the real "how much of this line is actually left," per
+      // product decision (see the comment above items' own definition).
+      // Additive: existing consumers reading qty/location are
+      // unaffected; this is for whichever layer needs the TRUE
+      // remaining-quantity signal rather than inferring it from
+      // location being non-null.
+      qtyToHandle,
+      };
+    });
 
     // ASSUMPTION: the putAways endpoint itself has no status field.
-    // Inferred here as a proxy from qtyToHandle vs quantity across the
-    // Place lines — this is still just a read-time snapshot of BC's
-    // state, not the app's own source of truth for an in-progress
-    // document (the local outbox is). Now that confirmPutAwayItem
-    // actually writes back (Section 2.5), a document's status here will
-    // correctly reflect confirmed lines on the NEXT read, but isn't
-    // updated by this adapter proactively.
-    const allUntouched = placeLines.every((l) => l.qtyToHandle == null || l.qtyToHandle === l.quantity);
-    const allDone = placeLines.length > 0 && placeLines.every((l) => (l.qtyToHandle ?? l.quantity) === 0);
+    // Inferred here from each item's own computed qtyToHandle (see
+    // items' own definition above) — this is still just a read-time
+    // snapshot of BC's state, not the app's own source of truth for an
+    // in-progress document (the local outbox is).
+    //
+    // SUPERSEDES an earlier version of this comment: a prior fix here
+    // tried to distinguish "done" from "not done" by checking whether a
+    // bin was assigned, on the theory that an unassigned line's
+    // qtyToHandle: 0 was the only case that could be misread as
+    // complete. That theory was ALSO wrong, confirmed directly against
+    // real data: WHPA-000169's A6001 line has a bin Business Central had
+    // already pre-SUGGESTED, with Place qtyToHandle: 0, despite no
+    // operator ever having touched it — a pre-assigned bin is not
+    // evidence of real confirmation either. The only reliable signal is
+    // each item's own computed qtyToHandle (Take.qtyToHandle minus
+    // Place.qtyToHandle), which stays at the full quantity until
+    // genuine work has actually happened, regardless of whether a bin
+    // happens to be pre-suggested.
+    const allDone = items.length > 0 && items.every((i) => i.qtyToHandle === 0);
+    const allUntouched = items.every((i) => i.qtyToHandle === i.qty);
     const status = allDone ? 'complete' : allUntouched ? 'assigned' : 'inProgress';
 
     return {
