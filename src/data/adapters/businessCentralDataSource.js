@@ -26,6 +26,24 @@ const logger = require('../../utils/logger');
  *
  * Auth is HTTP Basic (username + Business Central Web Service Access Key),
  * not OAuth2 — see _bcGet below.
+ *
+ * PUT-AWAY SAFEGUARD — Take/Place qtyToHandle, unassigned lines (see
+ * _mapPutAway's own implementation for the actual code): confirmed real
+ * against WHPA-000169 that Business Central's Take and Place
+ * qtyToHandle values do NOT reliably behave as "Take stays pinned at
+ * the original qty while Place counts down" — on some documents they
+ * move in lockstep (both read the same value), which would make a
+ * Take-minus-Place subtraction collapse to zero regardless of actual
+ * progress. Per direct instruction, this is special-cased rather than
+ * solved generally (BC's exact semantics for these two fields are still
+ * not fully understood — this file's own history already has two
+ * earlier "definitive" fixes here, each disproven by the next real
+ * document): whenever a Place line's binCode is null/empty AND its own
+ * qtyToHandle is non-zero, that qtyToHandle is returned AS-IS — no bin
+ * assigned with a nonzero remaining quantity is an unambiguous "not
+ * started" signal on its own, regardless of what the Take/Place
+ * subtraction would otherwise produce. Every other case still goes
+ * through the existing Take-minus-Place computation.
  */
 class BusinessCentralDataSource {
   constructor(config) {
@@ -244,12 +262,29 @@ class BusinessCentralDataSource {
 
     const items = placeLines.map((line) => {
       const takeLine = takeByLineNo.get(line.lineNo - 10000);
-      // Falls back to the Place line's own qtyToHandle if no matching
-      // Take is found — shouldn't happen against real data given the
-      // pairing above, but a document structured unexpectedly should
-      // degrade to the old behavior rather than produce a wrong number
-      // silently or throw.
-      const qtyToHandle = takeLine ? takeLine.qtyToHandle - line.qtyToHandle : line.qtyToHandle;
+      // PUT-AWAY SAFEGUARD (see this file's own top-of-file doc for the
+      // full reasoning) — checked FIRST, ahead of the Take/Place
+      // subtraction below: a Place line with no bin assigned
+      // (binCode null/empty) and a non-zero qtyToHandle is, on its own,
+      // an unambiguous "this line has not been started" — Business
+      // Central's Take/Place qtyToHandle pairing has NOT been reliably
+      // observed to behave as "Take stays pinned, Place counts down"
+      // (confirmed real: WHPA-000169's lines show Take and Place moving
+      // in LOCKSTEP, which would make the subtraction below collapse to
+      // zero regardless of actual progress), so this case is returned
+      // directly rather than trusting that subtraction.
+      const hasNoBinAssigned = !line.binCode || !line.binCode.trim();
+      let qtyToHandle;
+      if (hasNoBinAssigned && line.qtyToHandle !== 0) {
+        qtyToHandle = line.qtyToHandle;
+      } else {
+        // Falls back to the Place line's own qtyToHandle if no matching
+        // Take is found — shouldn't happen against real data given the
+        // pairing above, but a document structured unexpectedly should
+        // degrade to the old behavior rather than produce a wrong number
+        // silently or throw.
+        qtyToHandle = takeLine ? takeLine.qtyToHandle - line.qtyToHandle : line.qtyToHandle;
+      }
       return {
       sku: line.itemNo,
       description: line.itemDesc,
