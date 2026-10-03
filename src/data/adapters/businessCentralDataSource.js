@@ -772,6 +772,18 @@ class BusinessCentralDataSource {
   /// needs it: a bin code that exists in a different BC location must be
   /// treated as NOT FOUND here, not "found and available," since it
   /// isn't valid for the document/line this check is actually gating.
+  /// Per direct instruction: a non-empty bin is no longer rejected here.
+  /// Business Central itself does not enforce "the bin must be empty" —
+  /// the earlier isEmpty rejection was this middleware's own, overly
+  /// conservative assumption, not something BC actually requires. Real
+  /// BC's /Bins endpoint only ever exposes isEmpty as a bare boolean
+  /// (see this method's own earlier doc above), so unlike
+  /// demoDataSource.js's richer occupantSku-based check (same-sku
+  /// top-up allowed, different-sku rejected), there is no way to tell
+  /// here WHAT occupies a non-empty bin — so this no longer tries to
+  /// gate on it at all. A recognized bin is now always available;
+  /// "not recognized" (the bin code doesn't exist, or exists in a
+  /// different BC location) is still the only rejection.
   async checkPutAwayBin(payload) {
     const { binCode, locationCode } = payload || {};
     if (!binCode) throw ApiError.badRequest('binCode is required.');
@@ -779,9 +791,6 @@ class BusinessCentralDataSource {
 
     if (!bin) {
       return { available: false, reason: `Bin "${binCode}" is not recognized.` };
-    }
-    if (!bin.isEmpty) {
-      return { available: false, reason: `Bin ${bin.binCode} is already occupied.` };
     }
     return { available: true };
   }
