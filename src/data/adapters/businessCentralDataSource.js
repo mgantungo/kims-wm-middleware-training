@@ -42,6 +42,23 @@ function pickBinMatch(matches, scanned) {
   return null;
 }
 
+/// Field names actually present at each level of a Section 2.2.2
+/// response — union across every bin, content line and lot returned.
+/// Used only by searchBin's diagnostic log.
+function describeBinFields(bins) {
+  const binKeys = new Set();
+  const lineKeys = new Set();
+  const lotKeys = new Set();
+  for (const bin of bins) {
+    Object.keys(bin).forEach((k) => binKeys.add(k));
+    for (const line of bin.binContentLines || []) {
+      Object.keys(line).forEach((k) => lineKeys.add(k));
+      for (const lot of line.palletAndLots || []) Object.keys(lot).forEach((k) => lotKeys.add(k));
+    }
+  }
+  return { bin: [...binKeys], binContentLine: [...lineKeys], palletAndLot: [...lotKeys] };
+}
+
 /// Legacy flat `items` list ({ name, sku, batch, units }), one row per
 /// lot — kept so app builds that predate `contents` keep rendering.
 /// Derived from `contents` so the two can never disagree.
@@ -739,10 +756,30 @@ class BusinessCentralDataSource {
     let filter = `(binCode eq '${upper}' or ${barcodeClauses.join(' or ')})`;
     if (locationCode) filter += ` and locationCode eq '${odataString(locationCode)}'`;
 
-    const data = await this._bcGet(
-      `${BINS_ENTITY}?$expand=binContentLines($expand=palletAndLots)&$filter=${encodeURIComponent(filter)}`,
-    );
+    const requestPath = `${BINS_ENTITY}?$expand=binContentLines($expand=palletAndLots)&$filter=${encodeURIComponent(filter)}`;
+    const data = await this._bcGet(requestPath);
     const matches = data.value || [];
+
+    // TEMPORARY diagnostic aid, same pattern as getPutAwayDocuments:
+    // logs the exact, unmapped response Business Central sent for this
+    // scan, before any mapping touches it, so the real fields can be
+    // checked against Section 2.2.2 in the server terminal. `fields`
+    // lists every field name actually present at each level (bin,
+    // content line, lot), which is quicker to read than the raw payload
+    // for a bin with many lines. Remove, or drop to logger.debug, once
+    // the field set is confirmed.
+    logger.info(
+      {
+        scanned,
+        locationCode: locationCode || null,
+        request: decodeURIComponent(requestPath),
+        matchCount: matches.length,
+        fields: describeBinFields(matches),
+        rawBcResponse: data,
+      },
+      'Raw Business Central response — GET Bins (bin inquiry)',
+    );
+
     if (matches.length === 0) throw ApiError.notFound(`Bin "${scanned}" is not recognized.`);
 
     const bin = pickBinMatch(matches, scanned);
