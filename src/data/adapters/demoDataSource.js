@@ -312,6 +312,36 @@ class DemoDataSource {
     return { ok: true };
   }
 
+  /// Demo counterpart to businessCentralDataSource.js's confirmPickBatch —
+  /// same payload ({ docId, bcPickId?, entries: [{ sku, bcLineId?,
+  /// location, qty, lotNo?, serialNo? }] }) and same response shape, so
+  /// the app behaves identically whichever adapter PICK_CONFIRM_SOURCE
+  /// points at. Demo items have no bcLineId, so entries are matched by
+  /// sku; register is a no-op that always "succeeds".
+  async confirmPickBatch(payload) {
+    const { docId, entries } = payload || {};
+    const doc = this._pickDocs[docId];
+    if (!doc) throw ApiError.notFound(`Pick document "${docId}" not found.`);
+    if (!Array.isArray(entries) || entries.length === 0) {
+      throw ApiError.badRequest('confirmPickBatch requires at least one entry.');
+    }
+    doc._confirmed = doc._confirmed || new Set();
+    for (const entry of entries) {
+      if (!doc.items.some((i) => i.sku === entry.sku)) {
+        throw ApiError.badRequest(`Item "${entry.sku}" is not part of document "${docId}".`);
+      }
+      doc._confirmed.add(entry.sku);
+    }
+    doc.status = doc._confirmed.size >= new Set(doc.items.map((i) => i.sku)).size ? 'complete' : 'inProgress';
+    return { ok: true, registerAttempted: true, registered: true, registerError: null };
+  }
+
+  async registerPick(payload) {
+    const { docId } = payload || {};
+    if (!docId) throw ApiError.badRequest('docId is required.');
+    return { ok: true };
+  }
+
   // ------------------------------------------------------------------
   // Verify & Pack
   // ------------------------------------------------------------------

@@ -152,7 +152,41 @@
  *   step to model.
  * getPickDocuments()                    -> { documents: PickDocument[] }
  * getPickDocument(docId)                -> PickDocument
+ *   PickDocument: { docId, shipmentRef, dueDate, status, isHighPriority,
+ *     items: PickLineItem[],
+ *     // Business Central only (additive):
+ *     bcPickId, locationCode, assignedUserId, stagingBins: string[] }
+ *   PickLineItem: { sku, description, qty, location,
+ *     // Business Central only (additive):
+ *     bcLineId, lineNo, variantCode, lotNo, serialNo, isLotTracked,
+ *     isSerialTracked, scannable, destinationBin, bcQtyToHandle }
+ *   Business Central: Section 2.5, GET picks?$expand=pickLines. Only Take
+ *   lines become items (BC syncs Place lines itself, Section 2.9.5); qty
+ *   is qtyOutstanding; picks with nothing outstanding are omitted.
+ *   status is always 'assigned' from a BC read — qtyToHandle's meaning
+ *   on an untouched line is not yet confirmed against live data (see
+ *   businessCentralDataSource.js's _mapPick), so progress stays with the
+ *   app's own local scan state. shipmentRef/isHighPriority have no BC
+ *   equivalent (pick number / false); dueDate is the assignment date.
  * confirmPickItem(payload)              -> { ok: true }
+ *   Demo: { docId, sku, scanLog? }. Business Central: Section 2.9
+ *   UpdateLineScan, payload { bcLineId, location, qty, lotNo?, serialNo? }
+ *   — one scan, real-time. Not de-duplicated by BC: never resend a scan
+ *   that already succeeded.
+ * confirmPickBatch(payload)             -> { ok: true, registerAttempted,
+ *                                            registered, registerError }
+ *   payload: { docId, bcPickId?, entries: [{ sku, bcLineId?, location,
+ *   qty, lotNo?, serialNo? }] } — same entry shape as confirmPutAwayBatch.
+ *   Business Central: Section 2.10 ProcessBatchScans (all-or-nothing),
+ *   then Section 2.11 Register straight after, since the app only sends a
+ *   pick's batch once the whole pick is done. Register's outcome is
+ *   reported, never thrown: the scans are already saved by then, and
+ *   resending them would double-count. The same bcLineId may repeat
+ *   (bin change mid-line triggers BC's own split, Section 2.10.4).
+ * registerPick(payload)                 -> { ok: true }
+ *   payload: { docId, bcPickId? } — Section 2.11, for a manual Register.
+ *   Partial registration is allowed: unscanned quantity stays
+ *   outstanding on the same pick.
  *   payload.scanLog (optional): same shape as confirmPutAwayItem above.
  *
  * Scan exceptions (wrong item / wrong bin / item not on this document,
@@ -174,26 +208,38 @@
  * confirmShipLoad(payload)              -> { ok: true }
  * generateGatePass(payload)             -> GatePass
  * searchItem(query)                     -> ItemInquiryResult
- * searchBin(code)                       -> BinInquiryResult
- *   { binCode, location, isActive, items, contentsAvailable,
- *     lastSyncedAt, binDescription?, binTypeCode?, zoneCode?, isEmpty? }
- *   Business Central's version (Section 2.2.2, GET /Bins?$expand=
- *   binContentLines($expand=palletAndLots)) is now a genuinely real
- *   mapping, not the partial one this used to be — real bin metadata
- *   (location/zone/type/description/barcode/empty-status) PLUS real
- *   contents, one BinItemLine per LOT when an item is lot/serial-tracked
- *   (a single content line can span several lots, each with its own
- *   quantity) or one per content line when it isn't. contentsAvailable
- *   is true whenever this adapter successfully returns a bin at all —
- *   there's no longer a real-BC case where it's false. name is a real
- *   item description, cross-referenced from Section 2.3 (GET /items)
- *   since binContentLines itself only has itemNo — see
- *   businessCentralDataSource.js's _mapBinContentsToItems /
- *   _fetchItemNameLookup for the full mapping. Every field the demo
- *   adapter already returns keeps the same meaning here; the rest are
- *   additive.
- * listBins()                             -> { bins: BinSummary[] }
- *   The "browse all bins" view — unfiltered Section 2.2 (GET /Bins) on
+ * searchBin(code, { locationCode? })    -> BinInquiryResult
+ *   Bin Inquiry's primary action — the operator scans the bin in front
+ *   of them. [code] is whatever was scanned or typed and is matched
+ *   against binCode OR binBarCode. [locationCode] (the operator's own,
+ *   from the JWT) scopes the lookup; without it, a code shared by bins in
+ *   several locations fails with a clear "exists in more than one
+ *   location" error rather than silently picking one.
+ *   Business Central: Section 2.2.2 — GET Bins?$expand=binContentLines(
+ *   $expand=palletAndLots)&$filter=..., one round trip.
+ *   Shape:
+ *     { binCode, location, isActive, items, contentsAvailable,
+ *       lastSyncedAt, binDescription?, binTypeCode?, zoneCode?, isEmpty?,
+ *       // additive (Business Central only — absent from demo):
+ *       locationCode, binBarCode, matchedBy: 'binCode' | 'binBarCode',
+ *       crossDockBin, warehouseClassCode, binRanking, maximumCubage,
+ *       contents: BinContentLine[],
+ *       summary: { itemCount, lineCount, lotCount, hasAllocations } }
+ *   BinContentLine: { itemNo, itemName, variantCode, unitOfMeasureCode,
+ *     quantity, pickQty, putAwayQty, availableQty, lots: BinLot[] }
+ *     availableQty = max(0, quantity - pickQty); putAwayQty is inbound
+ *     and is not subtracted.
+ *   BinLot: { lotNo, serialNo, packageNo, unitOfMeasureCode, quantity }
+ *   `items` ({ name, sku, batch, units }, one row per lot) is the legacy
+ *   flat list, derived from `contents`, kept so older app builds keep
+ *   rendering. New app code should read `contents`. itemName comes from
+ *   Section 2.3 (GET /items), cached for 10 minutes; it falls back to
+ *   itemNo if that lookup fails — never an error. demoDataSource.js
+ *   accepts and ignores the second argument and returns the legacy shape
+ *   only.
+ * listBins(locationCode?)               -> { bins: BinSummary[] }
+ *   The "browse all bins" view (secondary — opened from Bin Inquiry's
+ *   side menu, loaded on demand) — unfiltered Section 2.2 (GET /Bins) on
  *   the Business Central side, the shared in-memory _binRegistry
  *   (unfiltered) on the demo side. Distinct from searchBin above, which
  *   looks up exactly one binCode. Field shape per bin: { binCode,

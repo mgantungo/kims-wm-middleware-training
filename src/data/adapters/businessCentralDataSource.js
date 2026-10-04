@@ -42,6 +42,29 @@ function pickBinMatch(matches, scanned) {
   return null;
 }
 
+/// Matches a pick Take line to its Place line: same item, variant, lot
+/// and serial (the same pairing Section 2.9.5 uses for its live sync).
+function pickTrackingKey(line) {
+  return [line.itemNo, line.variantCode || '', line.lotNo || '', line.serialNo || ''].join('|');
+}
+
+/// Quantity still to pick on a line. Falls back to quantity when BC
+/// omits qtyOutstanding (Section 2.5's sample omits empty fields).
+function outstandingOf(line) {
+  return toNumber(line.qtyOutstanding ?? line.quantity);
+}
+
+/// Pick header assignment date/time as an ISO string — the closest field
+/// Section 2.5 has to the app's dueDate. Falls back to now when BC sends
+/// no date or its blank date (0001-01-01), since the app expects a value.
+function pickDueDate(bc) {
+  const date = bc.assignmentDate;
+  if (!date || String(date).startsWith('0001-')) return new Date().toISOString();
+  const time = bc.assignmentTime && /^\d{2}:\d{2}/.test(bc.assignmentTime) ? bc.assignmentTime : '00:00:00';
+  const parsed = new Date(`${date}T${time}`);
+  return Number.isNaN(parsed.getTime()) ? new Date().toISOString() : parsed.toISOString();
+}
+
 /// Field names actually present at each level of a Section 2.2.2
 /// response — union across every bin, content line and lot returned.
 /// Used only by searchBin's diagnostic log.
@@ -93,7 +116,9 @@ function flattenContentsToItems(contents) {
  * confirmPutAwayItem (Section 2.5's PATCH), registerPutAway (Section
  * 2.6's Register action), searchBin (Section 2.2.2's single-bin GET
  * with binContentLines/palletAndLots expanded), listBins (Section 2.2's
- * GET /Bins), and checkPutAwayBin (GET /Bins metadata lookup via
+ * GET /Bins), Pick (Sections 2.5/2.9/2.10/2.11: getPickDocuments,
+ * getPickDocument, confirmPickItem, confirmPickBatch, registerPick), and
+ * checkPutAwayBin (GET /Bins metadata lookup via
  * _fetchBinByCode — see checkPutAwayBin's own doc for exactly what that
  * can and can't answer compared to the mocked demo version).
  *
@@ -682,9 +707,255 @@ class BusinessCentralDataSource {
   }
 
   async suggestPutAwayBin() { return this._notImplemented('suggestPutAwayBin'); }
-  async getPickDocuments() { return this._notImplemented('getPickDocuments'); }
-  async getPickDocument() { return this._notImplemented('getPickDocument'); }
-  async confirmPickItem() { return this._notImplemented('confirmPickItem'); }
+  // ==================================================================
+  // Pick — Sections 2.5 (GET picks), 2.9 (UpdateLineScan), 2.10 (Batch
+  // Scan), 2.11 (Register)
+  // ==================================================================
+
+  /// Maps one Business Central pick (with expanded pickLines) onto the
+  /// app's existing PickDocument shape — { docId, shipmentRef, dueDate,
+  /// status, isHighPriority, items: [{ sku, description, qty, location }] }
+  /// — so the current pick screens keep working, plus additive BC fields
+  /// the scan/confirm path needs.
+  ///
+  /// Only TAKE lines become items. Per Section 2.9.5, Business Central
+  /// keeps each Place line (dispatch/staging) in sync automatically on
+  /// every Take scan, and the app must never touch Place lines — so the
+  /// operator only ever scans "take from bin X". Each item carries its
+  /// matching Place line's bin as destinationBin, for display only.
+  _mapPick(bc) {
+    const lines = bc.pickLines || [];
+    const placeLines = lines.filter((l) => l.actionType === 'Place');
+    const placeByKey = new Map(placeLines.map((l) => [pickTrackingKey(l), l]));
+
+    // Lines already fully registered by an earlier (partial) Register
+    // have nothing outstanding; they're not work for the operator.
+    const takeLines = lines.filter((l) => l.actionType === 'Take' && outstandingOf(l) > 0);
+
+    const items = takeLines.map((line) => {
+      const placeLine = placeByKey.get(pickTrackingKey(line));
+      return {
+        // ---- Existing PickLineItem shape ----
+        sku: line.itemNo,
+        description: line.itemDesc,
+        // qtyOutstanding, not quantity: after a partial Register (Section
+        // 2.11) quantity keeps the original figure while qtyOutstanding
+        // is what is genuinely still to pick.
+        qty: outstandingOf(line),
+        location: line.binCode && line.binCode.trim() ? line.binCode : null,
+        // ---- Additive, Business Central only ----
+        bcLineId: line.id || null,
+        lineNo: line.lineNo,
+        variantCode: line.variantCode || null,
+        // The lot/serial Business Central reserved for this line. Section
+        // 2.9.3: a scan must carry the SAME lot/serial or BC rejects it.
+        lotNo: line.lotNo || null,
+        serialNo: line.serialNo || null,
+        isLotTracked: line.isLotTracked === true,
+        isSerialTracked: line.isSerialTracked === true,
+        scannable: line.isScannable !== false,
+        destinationBin: placeLine && placeLine.binCode ? placeLine.binCode : null,
+        // Raw, unverified — see the status note below.
+        bcQtyToHandle: toNumber(line.qtyToHandle),
+      };
+    });
+
+    // STATUS — deliberately NOT inferred from qtyToHandle. Section 2.5's
+    // own sample shows untouched Take lines with qtyToHandle EQUAL to
+    // quantity (3/3, 1/1), while Section 2.9.6 shows a first scan of 2
+    // producing qtyToHandle 2 — so on a fresh pick, qtyToHandle == qty
+    // could mean "untouched" or "fully scanned". Put Away hit exactly
+    // this trap with real data. Until a raw log of a pick taken before
+    // and after a scan settles it, a BC read only ever reports
+    // 'assigned'; the app's own local scan state (local-first, outbox)
+    // remains the source of truth for progress, as it already is.
+    const status = 'assigned';
+
+    return {
+      docId: bc.no,
+      // No shipment reference in Section 2.5's schema. Uses a line's
+      // sourceDoc if Business Central sends one (put-aways do, picks are
+      // undocumented), otherwise the pick number itself.
+      shipmentRef: lines.find((l) => l.sourceDoc)?.sourceDoc || bc.no,
+      dueDate: pickDueDate(bc),
+      status,
+      // No priority field exists in Section 2.5.
+      isHighPriority: false,
+      items,
+      // ---- Additive, Business Central only ----
+      bcPickId: bc.id,
+      locationCode: bc.locationCode,
+      assignedUserId: bc.assignedUserId || null,
+      stagingBins: [...new Set(placeLines.map((l) => l.binCode).filter(Boolean))],
+    };
+  }
+
+  async getPickDocuments() {
+    const data = await this._bcGet('picks?$expand=pickLines');
+    // TEMPORARY diagnostic aid, same as getPutAwayDocuments — the raw,
+    // unmapped response, to verify Section 2.5's pickLines fields
+    // (especially qtyToHandle's real behaviour, see _mapPick's status
+    // note) against live data. Remove or drop to logger.debug once
+    // confirmed.
+    logger.info({ rawBcResponse: data }, 'Raw Business Central response — GET picks?$expand=pickLines');
+    const documents = (data.value || [])
+      .map((d) => this._mapPick(d))
+      // A pick whose Take lines are all fully registered has no work
+      // left on it for the floor.
+      .filter((d) => d.items.length > 0);
+    return { documents };
+  }
+
+  async getPickDocument(docId) {
+    const filter = encodeURIComponent(`no eq '${odataString(docId)}'`);
+    const data = await this._bcGet(`picks?$expand=pickLines&$filter=${filter}`);
+    logger.info({ docId, rawBcResponse: data }, 'Raw Business Central response — GET picks (single document)');
+    const match = (data.value || [])[0];
+    if (!match) throw ApiError.notFound(`Pick document "${docId}" not found.`);
+    return this._mapPick(match);
+  }
+
+  /// Single scan — Section 2.9, POST .../pickLines(bcLineId)/
+  /// Microsoft.NAV.UpdateLineScan. Available for a real-time,
+  /// one-scan-at-a-time flow; the app's pick sync is batched per whole
+  /// pick (confirmPickBatch below), so this is not the main path.
+  ///
+  /// payload: { bcLineId, location, qty, lotNo?, serialNo? }. Business
+  /// Central does NOT de-duplicate: sending the same scan twice counts
+  /// it twice — the caller must never resend a scan that already got a
+  /// success response.
+  async confirmPickItem(payload) {
+    const { bcLineId, location, qty, lotNo, serialNo } = payload || {};
+    if (!bcLineId) {
+      throw ApiError.badRequest(
+        'confirmPickItem requires bcLineId — this line was not read from Business Central, so there is no line to scan against.',
+      );
+    }
+    if (!location) throw ApiError.badRequest('confirmPickItem requires location (the bin picked from).');
+
+    const body = { binCode: location, qtyToHandle: qty == null ? 1 : qty };
+    if (lotNo) body.scannedLotNo = lotNo;
+    if (serialNo) body.scannedSerialNo = serialNo;
+
+    const updatedLine = await this._bcPost(`pickLines(${bcLineId})/Microsoft.NAV.UpdateLineScan`, body);
+    return { ok: true, bcLine: updatedLine };
+  }
+
+  /// Whole-pick confirm — Section 2.10, POST .../picks(bcPickId)/
+  /// Microsoft.NAV.ProcessBatchScans, then Register (Section 2.11).
+  ///
+  /// payload: { docId, bcPickId, entries: [{ sku, bcLineId, location,
+  /// qty, lotNo?, serialNo? }] } — same entry shape as Put Away's batch
+  /// (location/qty, not BC's binCode/qtyToHandle). The SAME bcLineId may
+  /// appear more than once (e.g. 2 from bin A then 2 from bin B), in
+  /// order — that is exactly how Section 2.10.4 triggers BC's own split.
+  ///
+  /// Before sending, the pick is re-read once so every entry can be
+  /// checked against its real line. The batch is ALL-OR-NOTHING on BC's
+  /// side (Section 2.10.5) — one bad entry rolls back everything — so a
+  /// problem caught here gives the operator one clear message instead of
+  /// BC's aggregated "Processed 2, skipped 1" text:
+  ///   * the line must exist on this pick and be a Take line;
+  ///   * serial-tracked lines must be sent as qty 1 per entry;
+  ///   * lot/serial: the value the app scanned is sent as-is. If the app
+  ///     didn't send one for a tracked line, the line's own reserved
+  ///     lot/serial is filled in, so the call can't fail just for a
+  ///     missing field — the label-vs-line check then happens in the app
+  ///     only. Each fill is logged.
+  async confirmPickBatch(payload) {
+    const { bcPickId, entries } = payload || {};
+    if (!bcPickId) {
+      throw ApiError.badRequest(
+        'confirmPickBatch requires bcPickId — this pick was not read from Business Central, so there is no pick to confirm against.',
+      );
+    }
+    if (!Array.isArray(entries) || entries.length === 0) {
+      throw ApiError.badRequest('confirmPickBatch requires at least one entry.');
+    }
+
+    const fresh = await this._bcGet(`picks(${bcPickId})?$expand=pickLines`);
+    const linesById = new Map((fresh.pickLines || []).map((l) => [l.id, l]));
+
+    const scanEntries = entries.map((entry, i) => {
+      const n = i + 1;
+      if (!entry.bcLineId || !entry.location) {
+        throw ApiError.badRequest(`Pick entry ${n}: bcLineId and location are required.`);
+      }
+      const qty = entry.qty == null ? 1 : Number(entry.qty);
+      if (!Number.isFinite(qty) || qty <= 0) {
+        throw ApiError.badRequest(`Pick entry ${n}: qty must be greater than zero.`);
+      }
+      const line = linesById.get(entry.bcLineId);
+      if (!line) {
+        throw ApiError.badRequest(`Pick entry ${n}: line ${entry.bcLineId} is not on pick ${fresh.no || bcPickId}.`);
+      }
+      if (line.actionType !== 'Take') {
+        throw ApiError.badRequest(`Pick entry ${n}: line ${line.lineNo} is a ${line.actionType} line — only Take lines are scanned.`);
+      }
+      if (line.isSerialTracked === true && qty !== 1) {
+        throw ApiError.badRequest(
+          `Pick entry ${n}: ${line.itemNo} is serial-tracked and must be sent as quantity 1 per serial (got ${qty}).`,
+        );
+      }
+
+      const scan = { id: entry.bcLineId, binCode: entry.location, qtyToHandle: qty };
+      if (line.isLotTracked === true) {
+        scan.lotNo = entry.lotNo || line.lotNo || '';
+        if (!entry.lotNo) logger.warn({ bcPickId, lineNo: line.lineNo, lotNo: scan.lotNo }, 'Pick entry had no scanned lot — used the line\'s own lot');
+      } else if (entry.lotNo) {
+        scan.lotNo = entry.lotNo;
+      }
+      if (line.isSerialTracked === true) {
+        scan.serialNo = entry.serialNo || line.serialNo || '';
+        if (!entry.serialNo) logger.warn({ bcPickId, lineNo: line.lineNo, serialNo: scan.serialNo }, 'Pick entry had no scanned serial — used the line\'s own serial');
+      } else if (entry.serialNo) {
+        scan.serialNo = entry.serialNo;
+      }
+      return scan;
+    });
+
+    logger.info({ bcPickId, pickNo: fresh.no, scanEntries }, 'Sending pick batch scan to Business Central');
+    await this._bcPost(`picks(${bcPickId})/Microsoft.NAV.ProcessBatchScans`, {
+      scannedPayload: JSON.stringify(scanEntries),
+    });
+
+    // The app only sends a pick's batch once the operator has finished
+    // the whole pick, so Register follows immediately. Same reporting
+    // contract as Put Away: awaited, outcome returned rather than
+    // thrown — the scans themselves are already saved in BC at this
+    // point, and a failed Register must never make the app retry them
+    // (BC doesn't de-duplicate; a resend would double-count).
+    const registerOutcome = await this._tryRegisterPick(bcPickId);
+    return { ok: true, ...registerOutcome };
+  }
+
+  async _tryRegisterPick(bcPickId) {
+    try {
+      await this._bcPost(`picks(${bcPickId})/Microsoft.NAV.Register`, {});
+      logger.info({ bcPickId }, 'Pick register succeeded');
+      return { registerAttempted: true, registered: true, registerError: null };
+    } catch (error) {
+      logger.warn({ bcPickId, err: error }, 'Pick register after batch scan failed');
+      return { registerAttempted: true, registered: false, registerError: error.message || String(error) };
+    }
+  }
+
+  /// Section 2.11 — POST .../picks(bcPickId)/Microsoft.NAV.Register,
+  /// empty body. Posts whatever is on qtyToHandle for every line; any
+  /// unscanned remainder stays outstanding on the same pick for a later
+  /// run (partial registration is simply a consequence of how much was
+  /// scanned). For a manual "Register" action in the app.
+  async registerPick(payload) {
+    const { bcPickId } = payload || {};
+    if (!bcPickId) {
+      throw ApiError.badRequest(
+        'registerPick requires bcPickId — this pick was not read from Business Central, so there is no pick to register.',
+      );
+    }
+    await this._bcPost(`picks(${bcPickId})/Microsoft.NAV.Register`, {});
+    return { ok: true };
+  }
+
   async getUnverifiedPicks() { return this._notImplemented('getUnverifiedPicks'); }
   async getVerifyPick() { return this._notImplemented('getVerifyPick'); }
   async submitVerifyPack() { return this._notImplemented('submitVerifyPack'); }

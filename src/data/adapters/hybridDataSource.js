@@ -8,9 +8,9 @@ const BusinessCentralDataSource = require('./businessCentralDataSource');
  * AT THE SAME TIME, in the same deployment — unlike DATA_SOURCE=
  * businessCentral directly, which switches the ENTIRE adapter at once and
  * breaks every module Business Central integration hasn't reached yet
- * (Transfer, Quarantine, Pick, etc. all throw BC_NOT_IMPLEMENTED the
- * moment that flag flips, even though only Put Away has actually been
- * migrated).
+ * (Transfer, Quarantine, Verify & Pack, etc. all throw BC_NOT_IMPLEMENTED
+ * the moment that flag flips). Migrated so far: Put Away, Bin Inquiry,
+ * Pick.
  *
  * Put Away's read (getPutAwayDocuments/getPutAwayDocument) and confirm
  * (confirmPutAwayItem) are routed INDEPENDENTLY, each behind its own env
@@ -27,7 +27,15 @@ const BusinessCentralDataSource = require('./businessCentralDataSource');
  * adapter.
  */
 class HybridDataSource {
-  constructor({ businessCentralConfig, putAwayReadSource, putAwayConfirmSource, putAwaySplitSource, binInquirySource }) {
+  constructor({
+    businessCentralConfig,
+    putAwayReadSource,
+    putAwayConfirmSource,
+    putAwaySplitSource,
+    binInquirySource,
+    pickReadSource,
+    pickConfirmSource,
+  }) {
     this._demo = demoDataSource;
     this._bc = new BusinessCentralDataSource(businessCentralConfig);
     this._putAwayReadSource = putAwayReadSource; // 'demo' | 'businessCentral'
@@ -41,6 +49,20 @@ class HybridDataSource {
     // point, since the plumbing is already here waiting.
     this._putAwaySplitSource = putAwaySplitSource; // 'demo' | 'businessCentral'
     this._binInquirySource = binInquirySource; // 'demo' | 'businessCentral'
+    // Pick — same read/confirm split as Put Away, for the same reason:
+    // reads change nothing, confirm WRITES to live inventory and
+    // registers the pick. Taken from the constructor when
+    // dataSourceFactory.js passes them, otherwise straight from the
+    // environment (PICK_READ_SOURCE / PICK_CONFIRM_SOURCE), so enabling
+    // Pick needs only .env lines — no factory or config change. Anything
+    // other than 'businessCentral' (including unset) means demo.
+    this._pickReadSource = pickReadSource || process.env.PICK_READ_SOURCE || 'demo';
+    this._pickConfirmSource = pickConfirmSource || process.env.PICK_CONFIRM_SOURCE || 'demo';
+  }
+
+  /// For the startup log line, so the terminal shows where Pick is routed.
+  describePickRouting() {
+    return { pickRead: this._pickReadSource, pickConfirm: this._pickConfirmSource };
   }
 
   _putAwayReadTarget() {
@@ -53,6 +75,14 @@ class HybridDataSource {
 
   _putAwaySplitTarget() {
     return this._putAwaySplitSource === 'businessCentral' ? this._bc : this._demo;
+  }
+
+  _pickReadTarget() {
+    return this._pickReadSource === 'businessCentral' ? this._bc : this._demo;
+  }
+
+  _pickConfirmTarget() {
+    return this._pickConfirmSource === 'businessCentral' ? this._bc : this._demo;
   }
 
   _binInquiryTarget() {
@@ -124,10 +154,19 @@ class HybridDataSource {
     return this._binInquiryTarget().checkPutAwayBin(...args);
   }
 
+  // ---------------- Pick — read and confirm independently routable ----------------
+  async getPickDocuments(...args) { return this._pickReadTarget().getPickDocuments(...args); }
+  async getPickDocument(...args) { return this._pickReadTarget().getPickDocument(...args); }
+
+  /// Confirm, batch confirm and register share ONE flag — they are the
+  /// same "writes to Business Central" lifecycle, and must never split
+  /// (scans going to BC while Register silently goes to demo, or the
+  /// reverse).
+  async confirmPickItem(...args) { return this._pickConfirmTarget().confirmPickItem(...args); }
+  async confirmPickBatch(...args) { return this._pickConfirmTarget().confirmPickBatch(...args); }
+  async registerPick(...args) { return this._pickConfirmTarget().registerPick(...args); }
+
   // ---------------- Everything else — always demo until its own phase ----------------
-  async getPickDocuments(...args) { return this._demo.getPickDocuments(...args); }
-  async getPickDocument(...args) { return this._demo.getPickDocument(...args); }
-  async confirmPickItem(...args) { return this._demo.confirmPickItem(...args); }
   async getUnverifiedPicks(...args) { return this._demo.getUnverifiedPicks(...args); }
   async getVerifyPick(...args) { return this._demo.getVerifyPick(...args); }
   async submitVerifyPack(...args) { return this._demo.submitVerifyPack(...args); }
