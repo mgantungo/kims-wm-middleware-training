@@ -7,7 +7,8 @@ const router = express.Router();
 
 // GET /inquiry/item?q=...
 router.get('/item', asyncHandler(controller.item));
-// GET /inquiry/bin?code=...
+// GET /inquiry/bin?code=...[&locationCode=...] — code may be a bin code
+// or a bin barcode (whatever the scanner read)
 router.get('/bin', asyncHandler(controller.bin));
 // GET /inquiry/bins — the full bins list ("browse all", not a single lookup)
 router.get('/bins', asyncHandler(controller.bins));

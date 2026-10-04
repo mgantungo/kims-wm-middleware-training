@@ -136,10 +136,10 @@ class HybridDataSource {
   async searchItem(...args) { return this._demo.searchItem(...args); }
 
   /// Independently routable — a read-only lookup, not tied to Put Away's
-  /// read/confirm flags at all (Bin Inquiry is its own module). See
-  /// businessCentralDataSource.js's searchBin for why the response is
-  /// only ever a partial mapping — Business Central has no documented
-  /// bin-CONTENTS endpoint, only bin metadata.
+  /// read/confirm flags at all (Bin Inquiry is its own module). Second
+  /// argument ({ locationCode }) passes straight through; see
+  /// businessCentralDataSource.js's searchBin for the full mapping
+  /// (Section 2.2.2 — bin metadata, contents and lot detail in one call).
   async searchBin(...args) {
     return this._binInquiryTarget().searchBin(...args);
   }

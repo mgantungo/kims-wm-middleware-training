@@ -11,14 +11,21 @@ async function item(req, res) {
 }
 
 async function bin(req, res) {
-  const code = req.query.code;
+  const code = typeof req.query.code === 'string' ? req.query.code.trim() : '';
   if (!code) throw ApiError.badRequest('Query parameter "code" is required.');
-  const result = await dataSource.searchBin(code);
-  // result.location (not .locationCode — see locationAccess.js's doc on
-  // why searchBin and listBins use different field names for the same
-  // concept). notFound, not forbidden — same reasoning as
-  // putAway.controller.js's getDocument: an operator outside this bin's
-  // location shouldn't learn from the response that it exists elsewhere.
+  // Same precedence as bins() below: the operator's own verified
+  // location always wins; a client-supplied locationCode is only used
+  // when the operator has none yet. Passed INTO the lookup so Business
+  // Central returns the bin at the operator's location — not whichever
+  // same-coded bin it happened to list first, which assertVisible below
+  // would then reject even though a valid bin exists here.
+  const locationCode = (req.user && req.user.locationCode) || req.query.locationCode;
+  const result = await dataSource.searchBin(code, { locationCode });
+  // Kept as defence in depth. result.location (not .locationCode — see
+  // locationAccess.js's doc on why searchBin and listBins use different
+  // field names for the same concept). notFound, not forbidden — same
+  // reasoning as putAway.controller.js's getDocument: an operator
+  // outside this bin's location shouldn't learn that it exists elsewhere.
   assertVisible(result.location, req, () => {
     throw ApiError.notFound(`Bin "${code}" is not recognized.`);
   });

@@ -2,6 +2,69 @@
 const ApiError = require('../../utils/apiError');
 const logger = require('../../utils/logger');
 
+/// Entity set for Section 2.2 / 2.2.x. The doc itself is inconsistent
+/// (2.2 writes "Bins", 2.2.1/2.2.2 write "bins"); "Bins" is what this
+/// adapter has been calling successfully against live BC, so it stays.
+/// If a BC upgrade ever makes entity sets case-sensitive, this is the
+/// only line to change.
+const BINS_ENTITY = 'Bins';
+
+/// How long the itemNo -> item name catalog is reused between Bin
+/// Inquiry scans. See _getItemNameLookup.
+const ITEM_NAME_TTL_MS = 10 * 60 * 1000;
+
+/// Escapes a value for use inside an OData single-quoted string literal.
+function odataString(value) {
+  return String(value ?? '').trim().replace(/'/g, "''");
+}
+
+function toNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function sameCode(a, b) {
+  return String(a || '').trim().toUpperCase() === String(b || '').trim().toUpperCase();
+}
+
+/// Picks the one bin a scan refers to. One match: that bin. Several
+/// (only possible when the lookup wasn't location-scoped): an exact
+/// binCode match beats a binBarCode match; if that still leaves more
+/// than one, the scan is genuinely ambiguous and null is returned.
+function pickBinMatch(matches, scanned) {
+  if (matches.length === 1) return matches[0];
+  const byCode = matches.filter((b) => sameCode(b.binCode, scanned));
+  if (byCode.length === 1) return byCode[0];
+  if (byCode.length === 0) {
+    const byBarcode = matches.filter((b) => sameCode(b.binBarCode, scanned));
+    if (byBarcode.length === 1) return byBarcode[0];
+  }
+  return null;
+}
+
+/// Legacy flat `items` list ({ name, sku, batch, units }), one row per
+/// lot — kept so app builds that predate `contents` keep rendering.
+/// Derived from `contents` so the two can never disagree.
+function flattenContentsToItems(contents) {
+  const items = [];
+  for (const line of contents) {
+    if (line.lots.length === 0) {
+      items.push({ name: line.itemName, sku: line.itemNo, batch: '', units: line.quantity });
+      continue;
+    }
+    for (const lot of line.lots) {
+      items.push({
+        name: line.itemName,
+        sku: line.itemNo,
+        batch: lot.lotNo || lot.serialNo || lot.packageNo || '',
+        units: lot.quantity,
+      });
+    }
+  }
+  return items;
+}
+
+
 /**
  * Implements the exact same method surface as DemoDataSource (see
  * dataSource.interface.js) so that flipping DATA_SOURCE=businessCentral in
@@ -11,10 +74,11 @@ const logger = require('../../utils/logger');
  * CURRENT SCOPE (last updated 2026-09): implemented against real Business
  * Central data — getPutAwayDocuments/getPutAwayDocument (read),
  * confirmPutAwayItem (Section 2.5's PATCH), registerPutAway (Section
- * 2.6's Register action), searchBin/listBins (Section 2.2's GET /Bins),
- * and checkPutAwayBin (built on the SAME GET /Bins lookup searchBin
- * uses — see checkPutAwayBin's own doc for exactly what that can and
- * can't answer compared to the mocked demo version).
+ * 2.6's Register action), searchBin (Section 2.2.2's single-bin GET
+ * with binContentLines/palletAndLots expanded), listBins (Section 2.2's
+ * GET /Bins), and checkPutAwayBin (GET /Bins metadata lookup via
+ * _fetchBinByCode — see checkPutAwayBin's own doc for exactly what that
+ * can and can't answer compared to the mocked demo version).
  *
  * Still `_notImplemented()`: validatePutAwayBin/suggestPutAwayBin. Not an
  * oversight — the documented /Bins endpoint has no capacity field, so
@@ -30,6 +94,9 @@ const logger = require('../../utils/logger');
 class BusinessCentralDataSource {
   constructor(config) {
     this.config = config;
+    // itemNo -> item name, see _getItemNameLookup.
+    this._itemNameCache = null;
+    this._itemNameCacheAt = 0;
   }
 
   _notImplemented(method) {
@@ -608,151 +675,204 @@ class BusinessCentralDataSource {
   async generateGatePass() { return this._notImplemented('generateGatePass'); }
   async searchItem() { return this._notImplemented('searchItem'); }
 
-  /// Maps onto Section 2.2, GET /Bins, filtered to one bin code.
+  /// Finds the ONE bin matching this code at [locationCode], using
+  /// Section 2.2 (GET /Bins) metadata only — no contents expansion.
+  /// Shared by checkPutAwayBin and validatePutAwayBin, which only need
+  /// "does this bin exist here," never what's in it, so they don't pay
+  /// for the heavier binContentLines/palletAndLots expansion that
+  /// searchBin uses. Returns the raw Business Central bin object, or null.
   ///
-  /// IMPORTANT — this is a DELIBERATELY partial mapping, not a full
-  /// bin-inquiry implementation. GET /Bins gives real metadata (location,
-  /// zone, type, description, barcode, and whether the bin is empty) but
-  /// NEVER a list of what's actually sitting in it — no documented
-  /// Business Central endpoint exposes bin contents (sku + qty per bin)
-  /// at all. Rather than silently return items: [] and let that look
-  /// identical to "this bin is genuinely empty," [contentsAvailable]:
-  /// false is included specifically so a caller can distinguish "we
-  /// don't have this data" from "the bin has nothing in it" — the demo
-  /// adapter's items array (with real sku/batch/units) has no Business
-  /// Central equivalent to source it from.
-  ///
-  /// Shared by searchBin and checkPutAwayBin below — both need "find the
-  /// one bin matching this code," they just react differently when
-  /// nothing matches (searchBin throws notFound; checkPutAwayBin returns
-  /// a soft { available: false }). Returns the raw Business Central bin
-  /// object, or null if nothing matched.
-  ///
-  /// [locationCode] is OPTIONAL and scopes the match to that location
-  /// when given — searchBin (a general lookup by code, no location
-  /// context) doesn't pass one; checkPutAwayBin (gating a specific
-  /// document/line's bin assignment) does, and MUST: GET
-  /// /Bins?$filter=binCode eq 'X' alone can match a same-named bin in a
-  /// completely different BC location, which would come back "found" and
-  /// "available" here but then fail Business Central's own PATCH .../
-  /// putAwayLines validation (Internal_InvalidTableRelation) once
-  /// confirmed, since that call validates the bin against the LINE's
-  /// real location, not just the code in isolation.
+  /// [locationCode] scopes the match, and MUST be passed when gating a
+  /// specific document/line's bin assignment: GET /Bins?$filter=binCode
+  /// eq 'X' alone can match a same-named bin in a completely different
+  /// BC location, which would come back "found" here but then fail
+  /// Business Central's own PATCH .../putAwayLines validation
+  /// (Internal_InvalidTableRelation), since that call validates the bin
+  /// against the LINE's real location, not just the code in isolation.
   async _fetchBinByCode(binCode, locationCode) {
-    const escapedBin = String(binCode || '').trim().replace(/'/g, "''");
-    let filter = `binCode eq '${escapedBin}'`;
-    if (locationCode) {
-      const escapedLoc = String(locationCode).trim().replace(/'/g, "''");
-      filter += ` and locationCode eq '${escapedLoc}'`;
-    }
-    const data = await this._bcGet(`Bins?$filter=${filter}`);
+    let filter = `binCode eq '${odataString(binCode)}'`;
+    if (locationCode) filter += ` and locationCode eq '${odataString(locationCode)}'`;
+    const data = await this._bcGet(`${BINS_ENTITY}?$filter=${encodeURIComponent(filter)}`);
     return (data.value || [])[0] || null;
   }
 
-  /// Every field the demo adapter returns (binCode, location, isActive,
-  /// items, lastSyncedAt) is still present here with the same meaning, so
-  /// nothing currently reading those specific fields breaks — the extra
-  /// fields below (binDescription, binTypeCode, zoneCode, isEmpty) are
-  /// purely additive. Deliberately NOT location-scoped (see
-  /// _fetchBinByCode's doc) — this is a general "look this code up
-  /// anywhere" inquiry, not a gate on a specific document's bin
-  /// assignment, so a same-named bin existing in more than one location
-  /// isn't a correctness problem here the way it is for checkPutAwayBin.
+  /// Bin Inquiry's primary action: the operator scans the bin they are
+  /// standing in front of and reads what's in it. Maps onto Section
+  /// 2.2.2 — GET bins?$expand=binContentLines($expand=palletAndLots)
+  /// &$filter=... — one round trip for metadata + contents + lot detail,
+  /// $expand first and $filter joined with &, exactly as the doc's
+  /// "Filtering by Bin Code" section specifies.
   ///
-  /// items/contentsAvailable are now real — Section 2.2.1/2.2.2
-  /// (binContentLines, optionally expanded with palletAndLots) is a
-  /// genuinely new Business Central capability this adapter didn't have
-  /// before. See _mapBinContentsToItems for the actual mapping.
-  async searchBin(binCode) {
-    if (!binCode) throw ApiError.badRequest('binCode is required.');
-    const escapedBin = String(binCode).trim().replace(/'/g, "''");
-    const data = await this._bcGet(`Bins?$filter=binCode eq '${escapedBin}'&$expand=binContentLines($expand=palletAndLots)`);
-    const bin = (data.value || [])[0] || null;
-    if (!bin) throw ApiError.notFound(`Bin "${binCode}" is not recognized.`);
+  /// [code] is whatever came off the scanner (or was typed), so it is
+  /// matched against BOTH binCode and binBarCode: a printed bin label
+  /// usually carries the barcode value (e.g. "MN-002927-03EN-P"), not
+  /// the short bin code (e.g. "A"). Matching binCode alone would make
+  /// real label scans come back "not recognized."
+  ///
+  /// [locationCode] (the operator's own location, supplied by
+  /// inquiry.controller.js from the JWT) scopes the lookup server-side.
+  /// Without it, a code that exists in several BC locations would
+  /// return whichever bin BC listed first — and the controller's
+  /// location visibility check would then reject a bin that ALSO exists
+  /// in the operator's own location. Scoping in the query fixes that at
+  /// the source instead of filtering after the fact.
+  ///
+  /// Response keeps every field the previous shape had (binCode,
+  /// location, isActive, items, contentsAvailable, lastSyncedAt,
+  /// binDescription, binTypeCode, zoneCode, isEmpty), so an app build
+  /// that hasn't been updated yet keeps working unchanged. New fields
+  /// are additive — see dataSource.interface.js's searchBin entry for
+  /// the full shape, and _mapBinContents for `contents`.
+  async searchBin(code, { locationCode } = {}) {
+    const scanned = String(code || '').trim();
+    if (!scanned) throw ApiError.badRequest('binCode is required.');
 
-    const items = await this._mapBinContentsToItems(bin.binContentLines || []);
+    // binCode is a BC Code field — always stored uppercase — so it's
+    // compared uppercased (covers a code typed in lowercase). binBarCode
+    // is free text, so it's compared exactly as scanned, plus uppercased
+    // when that differs, without relying on BC's collation to be
+    // case-insensitive.
+    const asScanned = odataString(scanned);
+    const upper = odataString(scanned.toUpperCase());
+    const barcodeClauses = [`binBarCode eq '${asScanned}'`];
+    if (upper !== asScanned) barcodeClauses.push(`binBarCode eq '${upper}'`);
+    let filter = `(binCode eq '${upper}' or ${barcodeClauses.join(' or ')})`;
+    if (locationCode) filter += ` and locationCode eq '${odataString(locationCode)}'`;
+
+    const data = await this._bcGet(
+      `${BINS_ENTITY}?$expand=binContentLines($expand=palletAndLots)&$filter=${encodeURIComponent(filter)}`,
+    );
+    const matches = data.value || [];
+    if (matches.length === 0) throw ApiError.notFound(`Bin "${scanned}" is not recognized.`);
+
+    const bin = pickBinMatch(matches, scanned);
+    if (!bin) {
+      // Only reachable with no operator location: the same code exists
+      // in more than one location and nothing distinguishes them. Say
+      // so plainly instead of silently showing one of them.
+      const locations = [...new Set(matches.map((b) => b.locationCode))].join(', ');
+      throw ApiError.badRequest(
+        `Bin "${scanned}" exists in more than one location (${locations}). Set your warehouse location and scan again.`,
+      );
+    }
+
+    const binContentLines = bin.binContentLines || [];
+    const contents = await this._mapBinContents(binContentLines);
 
     return {
+      // ---- Original shape (unchanged meaning) ----
       binCode: bin.binCode,
       location: bin.locationCode,
       isActive: true, // found in Business Central's own bin registry
-      items,
+      items: flattenContentsToItems(contents),
       contentsAvailable: true,
       lastSyncedAt: new Date().toISOString(),
-      // Additive — real Business Central metadata the demo shape never
-      // had, ignored harmlessly by any caller that doesn't know about it.
       binDescription: bin.binDescription,
       binTypeCode: bin.binTypeCode,
       zoneCode: bin.zoneCode,
       isEmpty: bin.isEmpty,
+      // ---- Additive ----
+      locationCode: bin.locationCode,
+      binBarCode: bin.binBarCode || '',
+      matchedBy: sameCode(bin.binCode, scanned) ? 'binCode' : 'binBarCode',
+      crossDockBin: bin.crossDockBin === true,
+      warehouseClassCode: bin.warehouseClassCode || '',
+      binRanking: bin.binRanking ?? 0,
+      maximumCubage: bin.MaximumCubage ?? 0,
+      contents,
+      summary: {
+        itemCount: new Set(contents.map((c) => c.itemNo)).size,
+        lineCount: contents.length,
+        lotCount: contents.reduce((n, c) => n + c.lots.length, 0),
+        hasAllocations: contents.some((c) => c.pickQty > 0 || c.putAwayQty > 0),
+      },
     };
   }
 
-  /// Maps Section 2.2.2's binContentLines (each optionally expanded with
-  /// palletAndLots) into the app's BinItemLine shape ({name, sku, batch,
-  /// units}) — per product decision, ONE ROW PER LOT when an item is
-  /// lot/serial-tracked (a single content line can span several lots,
-  /// and the operator needs each one's own quantity visible, not a
-  /// merged total), or one row for the whole content line when it isn't
-  /// tracked that way at all (no palletAndLots present — batch is then
-  /// genuinely empty, not guessed at; the screen shows "—" for that
-  /// case, see bin_inquiry_screen.dart's _ContentsTable).
+  /// Maps Section 2.2.2's binContentLines into display-ready content
+  /// lines — ONE ENTRY PER CONTENT LINE (item + variant + UoM), with
+  /// its lot/serial/package breakdown nested under `lots`, rather than
+  /// the old flat one-row-per-lot list. The operator facing a bin needs
+  /// both levels: the per-item total and allocations (what's actually
+  /// free to pick), and each lot's own quantity underneath it.
   ///
-  /// name is a REAL item description now, not itemNo repeated as both
-  /// fields — binContentLines itself has no description field, only
-  /// itemNo, so this cross-references Section 2.3 (GET /items) via
-  /// _fetchItemNameLookup. Falls back to itemNo itself if a given
-  /// itemNo genuinely isn't in that catalog (shouldn't happen against
-  /// real data, but a bin content line existing for an item the items
-  /// catalog doesn't know about is safer read as "show the code" than
-  /// as a thrown error over a cosmetic gap).
-  async _mapBinContentsToItems(binContentLines) {
+  /// availableQty = quantity - pickQty: stock not already promised to an
+  /// open pick. putAwayQty is reported but NOT subtracted — it is
+  /// inbound stock still on its way INTO this bin, not a claim on what's
+  /// already there. Floored at 0 so a transient BC inconsistency never
+  /// shows a negative figure on the floor.
+  ///
+  /// itemName is cross-referenced from Section 2.3 (GET /items), since
+  /// binContentLines carries itemNo only. If that lookup fails, the
+  /// inquiry still succeeds and falls back to showing itemNo — a missing
+  /// description is cosmetic and must never block the operator from
+  /// seeing quantities.
+  async _mapBinContents(binContentLines) {
     if (binContentLines.length === 0) return [];
 
-    const itemNames = await this._fetchItemNameLookup();
-    const items = [];
+    const itemNames = await this._getItemNameLookup();
 
-    for (const line of binContentLines) {
-      const name = itemNames.get(line.itemNo) || line.itemNo;
-      const lots = line.palletAndLots || [];
+    return binContentLines.map((line) => {
+      const quantity = toNumber(line.quantity);
+      const pickQty = toNumber(line.pickQty);
+      const putAwayQty = toNumber(line.putAwayQty);
+      const lots = (line.palletAndLots || [])
+        .map((lot) => ({
+          lotNo: lot.lotNo || '',
+          serialNo: lot.serialNo || '',
+          packageNo: lot.packageNo || '',
+          // Section 2.2.2: this field really is "unitofMeasureCode"
+          // (lowercase o) on palletAndLots, unlike its parent line.
+          unitOfMeasureCode: lot.unitofMeasureCode || lot.unitOfMeasureCode || line.unitOfMeasureCode || '',
+          quantity: toNumber(lot.quantity),
+        }))
+        .filter((lot) => lot.quantity !== 0);
 
-      if (lots.length === 0) {
-        items.push({ name, sku: line.itemNo, batch: '', units: line.quantity ?? 0 });
-        continue;
-      }
-
-      for (const lot of lots) {
-        const batch = lot.lotNo || lot.serialNo || lot.packageNo || '';
-        items.push({ name, sku: line.itemNo, batch, units: lot.quantity ?? 0 });
-      }
-    }
-
-    return items;
+      return {
+        itemNo: line.itemNo,
+        itemName: itemNames.get(line.itemNo) || line.itemNo,
+        variantCode: line.variantCode || '',
+        unitOfMeasureCode: line.unitOfMeasureCode || '',
+        quantity,
+        pickQty,
+        putAwayQty,
+        availableQty: Math.max(0, quantity - pickQty),
+        lots,
+      };
+    });
   }
 
-  /// Section 2.3 (GET /items) has no documented single-item lookup, and
-  /// its snake_case/mixed-case field naming (item_no, item_name, UoM) —
-  /// unlike the camelCase entities everywhere else in this adapter
-  /// (binCode, itemNo, locationCode) — marks it as a different kind of
-  /// API surface, not safe to assume standard OData $filter support on
-  /// without that being documented. So this fetches the whole catalog
-  /// once per searchBin call and builds an itemNo -> item_name lookup
-  /// locally, rather than filtering per unique item in the bin. No
-  /// caching — item names change rarely, but staying honest about
-  /// current data beats risking a stale one; worth revisiting with a
-  /// short-TTL cache if this proves slow against a large catalog.
-  async _fetchItemNameLookup() {
-    const data = await this._bcGet('items');
-    const lookup = new Map();
-    for (const item of data.value || []) {
-      if (item.item_no) lookup.set(item.item_no, item.item_name);
+  /// Item number -> item name, from Section 2.3 (GET /items). That
+  /// endpoint has no documented single-item filter, so the whole
+  /// catalog is fetched — but now CACHED for ITEM_NAME_TTL_MS. Bin
+  /// Inquiry's everyday use is an operator scanning bin after bin down
+  /// an aisle; re-downloading the full catalog on every scan was the
+  /// slowest part of each lookup, for data (item descriptions) that
+  /// almost never changes. A failed refresh keeps serving the previous
+  /// cache if there is one, or an empty map (itemNo shown instead) if
+  /// there isn't — never an error.
+  async _getItemNameLookup() {
+    const fresh = this._itemNameCache && Date.now() - this._itemNameCacheAt < ITEM_NAME_TTL_MS;
+    if (fresh) return this._itemNameCache;
+
+    try {
+      const data = await this._bcGet('items');
+      const lookup = new Map();
+      for (const item of data.value || []) {
+        if (item.item_no) lookup.set(item.item_no, item.item_name);
+      }
+      this._itemNameCache = lookup;
+      this._itemNameCacheAt = Date.now();
+      return lookup;
+    } catch (error) {
+      logger.warn({ err: error }, 'Item name lookup failed — bin inquiry will show item numbers only');
+      return this._itemNameCache || new Map();
     }
-    return lookup;
   }
 
   /// Section 2.2 has no endpoint dedicated to "is this bin available for
-  /// a specific sku" — this reuses the EXACT same GET /Bins?$filter
-  /// lookup searchBin uses above (via _fetchBinByCode), since that's the
+  /// a specific sku" — this uses the GET /Bins?$filter lookup in
+  /// _fetchBinByCode (metadata only, no contents), since that's the
   /// only real capability Business Central actually exposes here. This
   /// is a genuine, if reduced, capability — NOT the same behavior as
   /// demoDataSource.js's version: demo's in-memory registry tracks
@@ -768,8 +888,7 @@ class BusinessCentralDataSource {
   /// suggestPutAwayBin have the identical gap for the same reason.
   ///
   /// [locationCode], when given, is passed straight to _fetchBinByCode —
-  /// see that method's doc for why this one, unlike searchBin, genuinely
-  /// needs it: a bin code that exists in a different BC location must be
+  /// see that method's doc for why this check genuinely needs it: a bin code that exists in a different BC location must be
   /// treated as NOT FOUND here, not "found and available," since it
   /// isn't valid for the document/line this check is actually gating.
   /// Per direct instruction: a non-empty bin is no longer rejected here.
@@ -795,29 +914,22 @@ class BusinessCentralDataSource {
     return { available: true };
   }
 
-  /// Lists every bin from Section 2.2 (GET /Bins), unfiltered — the
-  /// "browse all bins" view, distinct from searchBin above which filters
-  /// to one binCode. Same field shape as demoDataSource.js's listBins
-  /// where both sources can support it (binCode, isEmpty); Business
-  /// Central additionally provides real metadata demo never had
-  /// (binDescription, locationCode, zoneCode, binTypeCode, binBarCode).
-  /// capacity/currentQty/occupantSku are demo-only concepts — the /Bins
-  /// endpoint has no capacity or contents field at all (see
-  /// businessCentralDataSource.js's searchBin doc for the same gap on
-  /// the single-bin lookup) — so they're simply absent here rather than
-  /// guessed at.
+  /// Lists bins from Section 2.2 (GET /Bins) — the secondary "browse
+  /// all bins" view, reached from Bin Inquiry's side menu and loaded only
+  /// when that view is opened (the screen itself is scan-first and no
+  /// longer fetches this on entry). Metadata only, no contents: browsing
+  /// hundreds of bins with binContentLines expanded would be far heavier
+  /// than the grid needs. Tapping a bin in the grid goes through
+  /// searchBin for its full contents.
+  ///
   /// [locationCode], when given, is applied server-side via OData
-  /// $filter (same pattern already proven by searchBin's binCode
-  /// filter) — meaningful for a warehouse with more than one BC
-  /// location, where fetching every bin everywhere just to look at one
-  /// location's would be wasteful. isEmpty is deliberately NOT filtered
-  /// here — that's left to the Flutter side to apply client-side over
-  /// whichever bins this call already returned, so toggling it doesn't
-  /// cost a network round trip.
+  /// $filter. isEmpty is deliberately NOT filtered here — the app
+  /// applies it client-side over the bins already returned, so toggling
+  /// it doesn't cost a network round trip.
   async listBins(locationCode) {
     const path = locationCode
-      ? `Bins?$filter=locationCode eq '${String(locationCode).replace(/'/g, "''")}'`
-      : 'Bins';
+      ? `${BINS_ENTITY}?$filter=${encodeURIComponent(`locationCode eq '${odataString(locationCode)}'`)}`
+      : BINS_ENTITY;
     const data = await this._bcGet(path);
     return {
       bins: (data.value || []).map((bin) => ({
