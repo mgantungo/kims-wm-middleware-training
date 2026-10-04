@@ -713,12 +713,42 @@ class BusinessCentralDataSource {
     return (data.value || [])[0] || null;
   }
 
+  /// One Section 2.2.2 query — bins with binContentLines and
+  /// palletAndLots expanded, narrowed by [filter] — returning the raw
+  /// matching bin objects. Used by searchBin for each of its lookups.
+  ///
+  /// TEMPORARY diagnostic aid, same pattern as getPutAwayDocuments: logs
+  /// the exact, unmapped response Business Central sent, before any
+  /// mapping touches it, so the real fields can be checked against
+  /// Section 2.2.2 in the server terminal. `fields` lists every field
+  /// name actually present at each level (bin, content line, lot) —
+  /// quicker to read than the raw payload for a bin with many lines.
+  /// Remove, or drop to logger.debug, once the field set is confirmed.
+  async _queryBinsWithContents(filter, scanned, locationCode) {
+    const requestPath = `${BINS_ENTITY}?$expand=binContentLines($expand=palletAndLots)&$filter=${encodeURIComponent(filter)}`;
+    const data = await this._bcGet(requestPath);
+    const matches = data.value || [];
+    logger.info(
+      {
+        scanned,
+        locationCode: locationCode || null,
+        request: decodeURIComponent(requestPath),
+        matchCount: matches.length,
+        fields: describeBinFields(matches),
+        rawBcResponse: data,
+      },
+      'Raw Business Central response — GET Bins (bin inquiry)',
+    );
+    return matches;
+  }
+
   /// Bin Inquiry's primary action: the operator scans the bin they are
   /// standing in front of and reads what's in it. Maps onto Section
-  /// 2.2.2 — GET bins?$expand=binContentLines($expand=palletAndLots)
-  /// &$filter=... — one round trip for metadata + contents + lot detail,
-  /// $expand first and $filter joined with &, exactly as the doc's
-  /// "Filtering by Bin Code" section specifies.
+  /// 2.2.2 — GET Bins?$expand=binContentLines($expand=palletAndLots)
+  /// &$filter=... — metadata + contents + lot detail per call, $expand
+  /// first and $filter joined with &, as the doc's "Filtering by Bin
+  /// Code" section specifies. One call for a bin-code scan; a second
+  /// only when the scan turns out to be a barcode (see the body).
   ///
   /// [code] is whatever came off the scanner (or was typed), so it is
   /// matched against BOTH binCode and binBarCode: a printed bin label
@@ -744,41 +774,29 @@ class BusinessCentralDataSource {
     const scanned = String(code || '').trim();
     if (!scanned) throw ApiError.badRequest('binCode is required.');
 
-    // binCode is a BC Code field — always stored uppercase — so it's
-    // compared uppercased (covers a code typed in lowercase). binBarCode
-    // is free text, so it's compared exactly as scanned, plus uppercased
-    // when that differs, without relying on BC's collation to be
-    // case-insensitive.
+    // Business Central rejects OR across DIFFERENT fields in an OData
+    // filter (501 BadRequest_MethodNotImplemented: "The 'OR' operator is
+    // not supported on distinct fields"), so binCode and binBarCode can't
+    // be matched in one query. Two lookups instead, cheapest-likely first:
+    //   1. binCode — a BC Code field, always stored uppercase, so it's
+    //      compared uppercased (covers a code typed or scanned lowercase).
+    //   2. Only if that finds nothing: binBarCode — free text, so it's
+    //      compared as scanned AND uppercased. OR on the SAME field is
+    //      allowed by BC, so this stays one call.
+    // A scan of the short bin code (the common case) costs one call; only
+    // a barcode-label scan costs two.
     const asScanned = odataString(scanned);
     const upper = odataString(scanned.toUpperCase());
-    const barcodeClauses = [`binBarCode eq '${asScanned}'`];
-    if (upper !== asScanned) barcodeClauses.push(`binBarCode eq '${upper}'`);
-    let filter = `(binCode eq '${upper}' or ${barcodeClauses.join(' or ')})`;
-    if (locationCode) filter += ` and locationCode eq '${odataString(locationCode)}'`;
+    const locationClause = locationCode ? ` and locationCode eq '${odataString(locationCode)}'` : '';
 
-    const requestPath = `${BINS_ENTITY}?$expand=binContentLines($expand=palletAndLots)&$filter=${encodeURIComponent(filter)}`;
-    const data = await this._bcGet(requestPath);
-    const matches = data.value || [];
-
-    // TEMPORARY diagnostic aid, same pattern as getPutAwayDocuments:
-    // logs the exact, unmapped response Business Central sent for this
-    // scan, before any mapping touches it, so the real fields can be
-    // checked against Section 2.2.2 in the server terminal. `fields`
-    // lists every field name actually present at each level (bin,
-    // content line, lot), which is quicker to read than the raw payload
-    // for a bin with many lines. Remove, or drop to logger.debug, once
-    // the field set is confirmed.
-    logger.info(
-      {
-        scanned,
-        locationCode: locationCode || null,
-        request: decodeURIComponent(requestPath),
-        matchCount: matches.length,
-        fields: describeBinFields(matches),
-        rawBcResponse: data,
-      },
-      'Raw Business Central response — GET Bins (bin inquiry)',
-    );
+    let matches = await this._queryBinsWithContents(`binCode eq '${upper}'${locationClause}`, scanned, locationCode);
+    if (matches.length === 0) {
+      const barcodeFilter =
+        upper === asScanned
+          ? `binBarCode eq '${asScanned}'`
+          : `(binBarCode eq '${asScanned}' or binBarCode eq '${upper}')`;
+      matches = await this._queryBinsWithContents(`${barcodeFilter}${locationClause}`, scanned, locationCode);
+    }
 
     if (matches.length === 0) throw ApiError.notFound(`Bin "${scanned}" is not recognized.`);
 
