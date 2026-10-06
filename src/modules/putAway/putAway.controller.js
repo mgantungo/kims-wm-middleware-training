@@ -115,11 +115,15 @@ async function register(req, res) {
   if (!docId || !bcPutAwayId) {
     throw ApiError.badRequest('docId and bcPutAwayId are required.');
   }
-  // Replayed from the sync outbox (see PutAwayRepository's
-  // putAwayRegister handler) — unlike confirmItem's own outbox entries,
-  // there's no operator standing here waiting on this specific call, so
-  // it genuinely benefits from offline resilience rather than needing a
-  // live/blocking round trip.
+  // Two callers. The FINAL register is replayed from the sync outbox (see
+  // PutAwayRepository's putAwayRegister handler) — unlike confirmItem's
+  // own outbox entries, there's no operator standing here waiting on that
+  // call, so it benefits from offline resilience rather than a
+  // live/blocking round trip. The PARTIAL register fired by Split Bin
+  // (PutAwayRepository.registerPartialNow) calls this same route directly
+  // and is awaited, since the operator is waiting on its outcome. Either
+  // way Business Central registers what is currently set to handle and
+  // leaves the remainder outstanding.
   const result = await dataSource.registerPutAway({ docId, bcPutAwayId });
   res.status(200).json(result);
 }

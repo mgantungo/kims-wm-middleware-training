@@ -40,6 +40,40 @@ const logger = require('../../utils/logger');
  * a candidate for registering (status 'complete'). This replaces the
  * older Take.qtyToHandle - Place.qtyToHandle subtraction, which could
  * not tell an untouched line from a finished one.
+ *
+ * PUT-AWAY SPLITTING, REGISTERING AND BINS (KIMS-WM API doc Sections
+ * 2.6, 2.7, 2.8 and the Notes for Integrators):
+ *   - Business Central performs every split itself. A scan (single
+ *     PATCH or a batch entry) for a line with a DIFFERENT bin than the
+ *     line's current one, while the line is PARTIALLY handled, creates a
+ *     new line for the remaining quantity on the new bin; the original
+ *     keeps what was handled, on its original bin. A different-bin scan
+ *     on a line with nothing handled yet, or one already fully handled,
+ *     fails ("Cannot execute split logic ..."). The same bin simply
+ *     accumulates. This adapter never builds a split line itself.
+ *   - A line is addressed by its id (SystemId) ALONE. lineNo is not
+ *     stable — a split creates a new line and shifts numbering — and a
+ *     split's response returns only the original line; re-GET with
+ *     $expand=putAwayLines to see the new one. Only Place lines can be
+ *     scanned; a serial-tracked line (quantity 1) can never be partially
+ *     handled, so it can never split. Lot and serial numbers need not be
+ *     sent: the id alone resolves the line, and a split carries them over.
+ *   - The batch (ProcessBatchScans) is all-or-nothing per call and
+ *     processes its entries strictly in order; the same id may repeat.
+ *   - The ONLY bin rule in the doc is that the bin must exist at the
+ *     put-away's location. There is no empty-bin or capacity rule, so
+ *     none is applied here: checkPutAwayBin and validatePutAwayBin
+ *     accept any bin recognized at the location, empty or not. Anything
+ *     Business Central itself restricts is enforced by Business Central
+ *     when the scan is pushed, and reported back verbatim.
+ *   - Register posts whatever quantity is currently set to handle on
+ *     each line and leaves the rest outstanding (qtyHandled /
+ *     qtyOutstanding). That is what lets the app's Split Bin push and
+ *     register part of a line while the document is still in progress.
+ *     Observed against WHPA-000169, and not described by the doc:
+ *     Register was rejected ("Bin Code must have a value ... Line
+ *     No.=40000") while ANOTHER line on the same document had a quantity
+ *     to handle and no bin yet.
  */
 class BusinessCentralDataSource {
   constructor(config) {
@@ -554,13 +588,17 @@ class BusinessCentralDataSource {
     }
   }
 
-  /// Maps onto Section 2.6, "Register Put-Away" — POST
+  /// Maps onto Section 2.8, "Register Put-Away" — POST
   /// .../putAways(bcPutAwayId)/Microsoft.NAV.Register, empty body, empty
   /// 200 response. Business Central's own equivalent of pressing
-  /// "Register" once every line on the document has been handled — the
-  /// app calls this exactly once per document, right after its last line
-  /// is confirmed (see PutAwayItemController._refreshAfterConfirmation /
-  /// PutAwayRepository.registerDocument).
+  /// "Register". Called by the app in two situations: (1) once, right
+  /// after a document's last line is confirmed (see
+  /// PutAwayItemController._refreshAfterConfirmation /
+  /// PutAwayRepository.registerDocument), and (2) as a PARTIAL register,
+  /// right after Split Bin pushes an item's scanned quantity (see
+  /// PutAwayRepository.registerPartialNow) — Business Central registers
+  /// what is currently set to handle and leaves the remainder
+  /// outstanding, so a partial register is not an error in itself.
   async registerPutAway(payload) {
     const { bcPutAwayId } = payload || {};
     if (!bcPutAwayId) {

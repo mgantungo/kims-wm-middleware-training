@@ -1,4 +1,4 @@
-// src/data/dataSource.interface.js
+// src/data/adapters/dataSource.interface.js
 /**
  * @fileoverview Contract every data source adapter must satisfy.
  *
@@ -127,25 +127,33 @@
  *   (Internal_InvalidTableRelation). demoDataSource.js's in-memory
  *   registry tracks occupantSku, so its version can distinguish empty
  *   (accepted), occupied by the SAME sku (accepted — a legitimate
- *   top-up), and occupied by a DIFFERENT sku (rejected).
- *   businessCentralDataSource.js's version is built on the SAME GET
+ *   top-up), and occupied by a DIFFERENT sku (rejected) — a demo-only
+ *   rule. businessCentralDataSource.js's version applies NO occupancy
+ *   rule at all, per product decision and the API doc (Sections 2.6 and
+ *   2.7 list exactly one bin rule: the bin must exist at the put-away's
+ *   location): any bin Business Central recognizes there is accepted,
+ *   empty or not. It is built on the SAME GET
  *   /Bins?$filter=binCode (AND locationCode, when given) lookup
- *   searchBin uses — real Business
- *   Central data only exposes isEmpty as a boolean, never what's
- *   actually occupying a non-empty bin, so it can only answer "empty"
- *   (accepted) or "not empty" (rejected, without saying by what). sku is
- *   accepted for signature parity but genuinely unused on that path.
+ *   searchBin uses. sku is accepted for signature parity but genuinely
+ *   unused on that path. Whatever Business Central itself restricts is
+ *   enforced by Business Central when the scan is pushed, and reported
+ *   back to the operator as its own message.
  * registerPutAway(payload)               -> { ok: true }
  *   payload: { docId, bcPutAwayId }
  *   Whole-document "Register" event — maps onto Business Central's POST
  *   .../putAways(bcPutAwayId)/Microsoft.NAV.Register (Section 2.6), its
  *   own equivalent of pressing "Register" once every line on the
- *   document has been handled. Called once, right after a document's
- *   last line is confirmed (see PutAwayItemController.
- *   _refreshAfterConfirmation / PutAwayRepository.registerDocument).
- *   Replayed from the sync outbox like confirmPutAwayItem, not live and
- *   blocking like validatePutAwayBin/suggestPutAwayBin/checkPutAwayBin —
- *   there's no operator standing at a bin waiting on this one. demoData-
+ *   document has been handled. Called right after a document's last
+ *   line is confirmed (see PutAwayItemController.
+ *   _refreshAfterConfirmation / PutAwayRepository.registerDocument),
+ *   and ALSO as a PARTIAL register right after Split Bin pushes an
+ *   item's scanned quantity (PutAwayRepository.registerPartialNow) —
+ *   Business Central registers what is currently set to handle on each
+ *   line and leaves the remainder outstanding (qtyHandled /
+ *   qtyOutstanding). The final one is replayed from the sync outbox
+ *   like confirmPutAwayItem, since no operator is standing at a bin
+ *   waiting on it; the partial one is a direct, awaited call, because
+ *   the operator is waiting on its outcome at the "Scan New Bin?" prompt. demoData-
  *   Source.js's version is a trivial no-op ({ ok: true }): a demo
  *   document is already fully described by doc.status flipping to
  *   'complete' once every item is confirmed, with no separate posting
