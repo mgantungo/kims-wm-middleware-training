@@ -3,6 +3,31 @@ const ApiError = require('../../utils/apiError');
 const logger = require('../../utils/logger');
 
 /**
+ * SERIAL-TRACKED LINES ARE FULFILLED BY SCANNING THEIR SERIAL.
+ *
+ * Business Central reports isScannable: false for serial-tracked lines
+ * (confirmed on WHPA-000170 and WHPA-000171) even though its own doc says
+ * the flag is "effectively always true". isScannable is about whether an
+ * ITEM barcode could be resolved; a serial-tracked line is identified by
+ * the SERIAL on the unit itself, which is a different thing — and the
+ * line already carries exactly the value a scan must match (serialNo).
+ * Leaving such a line "not scannable" sent it down the manual-quantity
+ * path, where several same-sku serial lines shared one entry field (the
+ * "Total handled quantity (2) exceeds the line quantity (1)" rejection on
+ * WHPA-149) and the operator had to repeat bin -> item for every unit.
+ *
+ * So a serial-tracked line that carries a serial number is treated as
+ * scannable. A serial-tracked line WITHOUT a serial number stays as
+ * Business Central reported it (nothing to match a scan against), and a
+ * non-serial line flagged unscannable (an item with no barcode at all —
+ * the electricity-pole case) is untouched.
+ *
+ * Set SERIAL_LINES_SCANNABLE=false to go back to using Business Central's
+ * flag verbatim for serial lines.
+ */
+const SERIAL_LINES_SCANNABLE = process.env.SERIAL_LINES_SCANNABLE !== 'false';
+
+/**
  * Implements the exact same method surface as DemoDataSource (see
  * dataSource.interface.js) so that flipping DATA_SOURCE=businessCentral in
  * .env is the *only* change needed to switch — no route or controller code
@@ -311,7 +336,12 @@ class BusinessCentralDataSource {
       // only with a wall plate) have no barcode reference configured in
       // BC at all — isScannable false for those, driving the manual
       // bin+SKU+quantity entry path instead of the scan loop.
-      scannable: line.isScannable !== false,
+      // A serial-tracked line with a known serial is scanned by that serial
+      // even when Business Central's own flag says false — see
+      // SERIAL_LINES_SCANNABLE at the top of this file for why.
+      scannable:
+        line.isScannable !== false ||
+        (SERIAL_LINES_SCANNABLE && line.isSerialTracked === true && !!(line.serialNo && String(line.serialNo).trim())),
       // New in the v2 doc update — drives which scan mode the app uses
       // for this line. isSerialTracked: each physical unit must be
       // scanned individually and the operator can never bulk-count it
