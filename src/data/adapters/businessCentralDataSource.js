@@ -28,6 +28,25 @@ const logger = require('../../utils/logger');
 const SERIAL_LINES_SCANNABLE = process.env.SERIAL_LINES_SCANNABLE !== 'false';
 
 /**
+ * REGISTER AS YOU GO — OFF BY DEFAULT.
+ *
+ * Normally a put-away is registered once, when its last line is done.
+ * Setting PUT_AWAY_REGISTER_PER_BIN=true makes the middleware also try to
+ * register right after each confirmed bin, so what was put away posts to
+ * Business Central immediately instead of waiting for the whole document.
+ *
+ * It is guarded: Register posts EVERYTHING currently set to handle on the
+ * document, not just what was just confirmed, so it only runs when the
+ * quantity Business Central has pending equals exactly what was just
+ * confirmed (and every line with quantity has a bin). Otherwise it is
+ * skipped and says why. It is off by default because Business Central has
+ * been seen to refill Qty. to Handle on the remaining lines after a
+ * Register (WHPA-000169), which makes the NEXT bin's push conflict; with
+ * the switch on, that shows up as a clear message instead of a surprise.
+ */
+const PUT_AWAY_REGISTER_PER_BIN = process.env.PUT_AWAY_REGISTER_PER_BIN === 'true';
+
+/**
  * Implements the exact same method surface as DemoDataSource (see
  * dataSource.interface.js) so that flipping DATA_SOURCE=businessCentral in
  * .env is the *only* change needed to switch — no route or controller code
@@ -572,10 +591,26 @@ class BusinessCentralDataSource {
       }
     }
 
-    const scanEntries = entries.map((e) => ({ id: e.bcLineId, binCode: e.location, qtyToHandle: e.qty }));
-    await this._bcPost(`putAways(${bcPutAwayId})/Microsoft.NAV.ProcessBatchScans`, {
-      scannedPayload: JSON.stringify(scanEntries),
-    });
+    // IDEMPOTENT PUSH. The API adds every scan to whatever Qty. to Handle
+    // is already on the line (Sections 2.6/2.7), so sending a quantity
+    // Business Central already holds — an earlier confirm that was never
+    // registered, a retry after a lost response, a bin confirmed twice —
+    // is rejected as "Total handled quantity (2) exceeds the outstanding
+    // quantity (1)" (WHPA-000176). Read what is actually there first and
+    // send only the difference.
+    const { toSend, held } = await this._reconcileBatchAgainstBc(bcPutAwayId, entries);
+    if (held.length > 0) {
+      logger.info(
+        { bcPutAwayId, held: held.map((e) => e.bcLineId), sending: toSend.length },
+        'Batch confirm: Business Central already holds these lines — not sending them again',
+      );
+    }
+    if (toSend.length > 0) {
+      const scanEntries = toSend.map((e) => ({ id: e.bcLineId, binCode: e.location, qtyToHandle: e.qty }));
+      await this._bcPost(`putAways(${bcPutAwayId})/Microsoft.NAV.ProcessBatchScans`, {
+        scannedPayload: JSON.stringify(scanEntries),
+      });
+    }
 
     // Per product decision: every time a bin's batch is successfully
     // pushed to Business Central, the middleware attempts to register the
@@ -588,9 +623,105 @@ class BusinessCentralDataSource {
     // reported alongside it rather than thrown — a failed or skipped
     // register must never make the app think the bin confirm itself
     // failed, which would risk it being retried unnecessarily.
-    const registerOutcome = await this._tryAutoRegister(bcPutAwayId);
+    let registerOutcome = await this._tryAutoRegister(bcPutAwayId);
+    if (PUT_AWAY_REGISTER_PER_BIN && !registerOutcome.registerAttempted) {
+      registerOutcome = await this._tryPartialRegister(
+        bcPutAwayId,
+        entries.reduce((sum, e) => sum + Number(e.qty || 0), 0),
+      );
+    }
 
-    return { ok: true, ...registerOutcome };
+    return { ok: true, held: held.length, ...registerOutcome };
+  }
+
+  /// Compares each entry with what Business Central ALREADY has on that
+  /// line and decides what, if anything, still needs sending. One fresh
+  /// read of the document, then per entry (Place line, same bin or none):
+  ///   nothing pending on the line ............ send as is (the normal case)
+  ///   pending == scanned ..................... already held — send nothing
+  ///   pending <  scanned ..................... send only the difference
+  ///   pending >  scanned ..................... CONFLICT — Business Central
+  ///       holds more than was scanned (typically refilled after a Register);
+  ///       sending anything would either overflow or, worse, let Register
+  ///       post units nobody scanned
+  ///   pending, but the line has no bin ....... CONFLICT — a bin cannot be
+  ///       set without adding quantity (qtyToHandle must be > 0)
+  /// An entry for a DIFFERENT bin than the line's current one is passed
+  /// through untouched: that is Business Central's own split territory
+  /// (Section 2.6) and is not this method's to second-guess.
+  /// A conflict throws BEFORE anything is sent, so the batch stays
+  /// all-or-nothing and the operator hears the real reason.
+  async _reconcileBatchAgainstBc(bcPutAwayId, entries) {
+    const data = await this._bcGet(`putAways(${bcPutAwayId})?$expand=putAwayLines`);
+    const placeById = new Map(
+      ((data && data.putAwayLines) || []).filter((l) => l.actionType === 'Place').map((l) => [l.id, l]),
+    );
+    const norm = (v) => String(v || '').trim().toUpperCase();
+    const toSend = [];
+    const held = [];
+    for (const e of entries) {
+      const line = placeById.get(e.bcLineId);
+      const pending = line ? Number(line.qtyToHandle || 0) : 0;
+      const lineBin = line ? norm(line.binCode) : '';
+      const sameOrNoBin = lineBin === '' || lineBin === norm(e.location);
+      if (!line || pending === 0 || !sameOrNoBin) {
+        toSend.push(e);
+        continue;
+      }
+      if (lineBin === '') {
+        throw ApiError.badRequest(
+          `Business Central already has ${pending} set to handle on line ${line.lineNo} but no bin on it, ` +
+            `so bin ${e.location} cannot be set without adding to that quantity.`,
+        );
+      }
+      if (pending === e.qty) {
+        held.push(e);
+      } else if (pending < e.qty) {
+        toSend.push({ ...e, qty: e.qty - pending });
+      } else {
+        throw ApiError.badRequest(
+          `Business Central already has ${pending} set to handle on line ${line.lineNo}, but only ${e.qty} was scanned.`,
+        );
+      }
+    }
+    return { toSend, held };
+  }
+
+  /// REGISTER AS YOU GO (see PUT_AWAY_REGISTER_PER_BIN). Registers only
+  /// when it is safe: Register posts whatever is set to handle on EVERY
+  /// line, so the document's total pending quantity must equal what was
+  /// just confirmed, and every line with quantity must have a bin.
+  /// Returns a result rather than throwing — a skipped or failed register
+  /// is information, never a reason to think the confirm itself failed.
+  async _tryPartialRegister(bcPutAwayId, expectedPending) {
+    const data = await this._bcGet(`putAways(${bcPutAwayId})?$expand=putAwayLines`);
+    const place = ((data && data.putAwayLines) || []).filter((l) => l.actionType === 'Place');
+    const pending = place.reduce((sum, l) => sum + Number(l.qtyToHandle || 0), 0);
+    if (pending !== expectedPending) {
+      return {
+        registerAttempted: false,
+        registered: false,
+        registerError:
+          `Not registered yet: Business Central has ${pending} set to handle across the document but ` +
+          `${expectedPending} was just confirmed — registering would post quantities that were not scanned.`,
+      };
+    }
+    const noBin = place.find((l) => Number(l.qtyToHandle || 0) > 0 && !String(l.binCode || '').trim());
+    if (noBin) {
+      return {
+        registerAttempted: false,
+        registered: false,
+        registerError: `Not registered yet: line ${noBin.lineNo} has quantity set to handle but no bin.`,
+      };
+    }
+    logger.info({ bcPutAwayId, pending }, 'Register-per-bin: pending matches what was confirmed — registering');
+    try {
+      await this._bcPost(`putAways(${bcPutAwayId})/Microsoft.NAV.Register`, {});
+      return { registerAttempted: true, registered: true, registerError: null };
+    } catch (error) {
+      logger.warn({ bcPutAwayId, err: error }, 'Register-per-bin attempt failed');
+      return { registerAttempted: true, registered: false, registerError: error.message || String(error) };
+    }
   }
 
   /// Re-reads the document fresh (not the batch-confirm response, which
