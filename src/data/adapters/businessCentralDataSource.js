@@ -1134,6 +1134,55 @@ class BusinessCentralDataSource {
     return { ok: true };
   }
 
+  /// Live check for the bin an operator scanned to TAKE a pick line from.
+  /// Business Central leaves most pick Take lines without a bin, and its
+  /// own scan rule is that the bin must physically hold the exact item /
+  /// lot / serial (Section 2.9.4). This answers that question up front —
+  /// before any scanning starts — from the bin's contents (Section 2.2.2,
+  /// the same read Bin Inquiry uses), scoped to the pick's location.
+  /// Payload: { binCode, sku, lotNo?, serialNo?, locationCode? }.
+  /// Returns { available, reason?, availableQty? }. Business Central stays
+  /// the final authority when the batch is sent; this only spares the
+  /// operator scanning into a bin that cannot accept it.
+  async checkPickBin(payload) {
+    const { binCode, sku, lotNo, serialNo, locationCode } = payload || {};
+    if (!binCode || !sku) throw ApiError.badRequest('binCode and sku are required.');
+    const esc = (v) => String(v).trim().replace(/'/g, "''");
+    let filter = `binCode eq '${esc(binCode)}'`;
+    if (locationCode) filter += ` and locationCode eq '${esc(locationCode)}'`;
+    const data = await this._bcGet(`Bins?$filter=${filter}&$expand=binContentLines($expand=palletAndLots)`);
+    const bin = (data.value || [])[0];
+    if (!bin) {
+      return { available: false, reason: `Bin "${binCode}" is not recognized at this location.` };
+    }
+
+    const norm = (v) => String(v || '').trim().toUpperCase();
+    const lines = (bin.binContentLines || []).filter((l) => norm(l.itemNo) === norm(sku));
+    if (lines.length === 0) {
+      return { available: false, reason: `Bin ${bin.binCode} holds no ${sku}.` };
+    }
+
+    let qty = 0;
+    for (const line of lines) {
+      const lots = line.palletAndLots || [];
+      if ((lotNo || serialNo) && lots.length > 0) {
+        for (const lot of lots) {
+          if (lotNo && norm(lot.lotNo) !== norm(lotNo)) continue;
+          if (serialNo && norm(lot.serialNo) !== norm(serialNo)) continue;
+          qty += Number(lot.quantity || 0);
+        }
+      } else {
+        qty += Number(line.quantity || 0);
+      }
+    }
+
+    if (qty <= 0) {
+      const what = [sku, lotNo ? `lot ${lotNo}` : null, serialNo ? `serial ${serialNo}` : null].filter(Boolean).join(' ');
+      return { available: false, reason: `Bin ${bin.binCode} holds no stock of ${what}.` };
+    }
+    return { available: true, availableQty: qty };
+  }
+
   async getUnverifiedPicks() { return this._notImplemented('getUnverifiedPicks'); }
   async getVerifyPick() { return this._notImplemented('getVerifyPick'); }
   async submitVerifyPack() { return this._notImplemented('submitVerifyPack'); }

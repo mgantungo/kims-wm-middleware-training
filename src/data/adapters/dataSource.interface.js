@@ -194,6 +194,11 @@
  *   reported, never thrown: the scans are already saved by then, and
  *   resending them would double-count. The same bcLineId may repeat
  *   (bin change mid-line triggers BC's own split, Section 2.10.4).
+ * checkPickBin(payload)                 -> { available, reason?, availableQty? }
+ *   payload: { binCode, sku, lotNo?, serialNo?, locationCode? } — can this
+ *   item be taken from the bin the operator scanned? Business Central:
+ *   Section 2.2.2 bin contents, scoped to the pick's location. Demo:
+ *   always available. Routed by PICK_READ_SOURCE (read-only).
  * registerPick(payload)                 -> { ok: true }
  *   payload: { docId, bcPickId? } — Section 2.11, for a manual Register.
  *   Partial registration is allowed: unscanned quantity stays

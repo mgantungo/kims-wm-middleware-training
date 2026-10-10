@@ -336,6 +336,15 @@ class DemoDataSource {
     return { ok: true, registerAttempted: true, registered: true, registerError: null };
   }
 
+  /// Demo counterpart to businessCentralDataSource.js's checkPickBin. Demo
+  /// data has no bin contents to check against, so any bin is accepted —
+  /// same shape as the Business Central answer.
+  async checkPickBin(payload) {
+    const { binCode, sku } = payload || {};
+    if (!binCode || !sku) throw ApiError.badRequest('binCode and sku are required.');
+    return { available: true };
+  }
+
   async registerPick(payload) {
     const { docId } = payload || {};
     if (!docId) throw ApiError.badRequest('docId is required.');

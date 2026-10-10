@@ -14,6 +14,9 @@ router.post('/confirm', asyncHandler(controller.confirmItem));
 // POST /pick/confirm-batch — whole pick in one call, then Register
 // (BC Sections 2.10 + 2.11).
 router.post('/confirm-batch', asyncHandler(controller.confirmBatch));
+// POST /pick/check-bin — can this item be taken from the scanned bin?
+// (bin contents, BC Section 2.2.2)
+router.post('/check-bin', asyncHandler(controller.checkBin));
 // POST /pick/register — manual Register (BC Section 2.11).
 router.post('/register', asyncHandler(controller.register));
 

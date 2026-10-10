@@ -157,6 +157,8 @@ class HybridDataSource {
   // ---------------- Pick — read and confirm independently routable ----------------
   async getPickDocuments(...args) { return this._pickReadTarget().getPickDocuments(...args); }
   async getPickDocument(...args) { return this._pickReadTarget().getPickDocument(...args); }
+  /// Read-only (bin contents), so it follows the READ flag.
+  async checkPickBin(...args) { return this._pickReadTarget().checkPickBin(...args); }
 
   /// Confirm, batch confirm and register share ONE flag — they are the
   /// same "writes to Business Central" lifecycle, and must never split

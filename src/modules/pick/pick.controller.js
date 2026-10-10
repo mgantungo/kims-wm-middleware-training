@@ -78,6 +78,19 @@ async function confirmBatch(req, res) {
   res.status(201).json(result);
 }
 
+/// POST /pick/check-bin — is the bin the operator just scanned one they
+/// can take this item from? Live and blocking (the operator is standing at
+/// the bin), never queued. Answers from the bin's contents in Business
+/// Central; see businessCentralDataSource.js's checkPickBin.
+async function checkBin(req, res) {
+  const { binCode, sku, lotNo, serialNo, locationCode } = req.body || {};
+  if (!binCode || !sku) {
+    throw ApiError.badRequest('binCode and sku are required.');
+  }
+  const result = await dataSource.checkPickBin({ binCode, sku, lotNo, serialNo, locationCode });
+  res.status(200).json(result);
+}
+
 /// POST /pick/register — manual Register (Section 2.11), e.g. to retry
 /// after confirm-batch reported registered: false. Partial registration is
 /// allowed: unscanned quantity stays outstanding on the same pick.
@@ -90,4 +103,4 @@ async function register(req, res) {
   res.status(200).json(result);
 }
 
-module.exports = { listDocuments, getDocument, confirmItem, confirmBatch, register };
+module.exports = { listDocuments, getDocument, confirmItem, confirmBatch, checkBin, register };
