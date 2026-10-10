@@ -78,6 +78,20 @@ if (!['demo', 'businessCentral'].includes(BIN_INQUIRY_SOURCE)) {
   throw new Error(`BIN_INQUIRY_SOURCE must be "demo" or "businessCentral", got "${BIN_INQUIRY_SOURCE}"`);
 }
 
+// Pick — same read/confirm split as Put Away, for the same reason: reads
+// change nothing, confirm WRITES to live inventory and registers the pick.
+// Confirm covers confirmPickItem, confirmPickBatch and registerPick
+// together so scans and Register can never go to different systems.
+const PICK_READ_SOURCE = process.env.PICK_READ_SOURCE || 'demo';
+if (!['demo', 'businessCentral'].includes(PICK_READ_SOURCE)) {
+  throw new Error(`PICK_READ_SOURCE must be "demo" or "businessCentral", got "${PICK_READ_SOURCE}"`);
+}
+
+const PICK_CONFIRM_SOURCE = process.env.PICK_CONFIRM_SOURCE || 'demo';
+if (!['demo', 'businessCentral'].includes(PICK_CONFIRM_SOURCE)) {
+  throw new Error(`PICK_CONFIRM_SOURCE must be "demo" or "businessCentral", got "${PICK_CONFIRM_SOURCE}"`);
+}
+
 // Business Central uses HTTP Basic Auth (username + Web Service Access
 // Key), not OAuth2 — see the KIMS-WM API Endpoint Reference doc, Section
 // 1. Only required when Business Central is ACTUALLY reachable through
@@ -98,7 +112,9 @@ const businessCentralInUse =
     (PUT_AWAY_READ_SOURCE === 'businessCentral' ||
       PUT_AWAY_CONFIRM_SOURCE === 'businessCentral' ||
       PUT_AWAY_SPLIT_SOURCE === 'businessCentral' ||
-      BIN_INQUIRY_SOURCE === 'businessCentral'));
+      BIN_INQUIRY_SOURCE === 'businessCentral' ||
+      PICK_READ_SOURCE === 'businessCentral' ||
+      PICK_CONFIRM_SOURCE === 'businessCentral'));
 
 if (businessCentralInUse) {
   const missing = Object.entries(businessCentral)
@@ -108,7 +124,8 @@ if (businessCentralInUse) {
     const hybridDetail =
       DATA_SOURCE === 'hybrid'
         ? `, PUT_AWAY_READ_SOURCE=${PUT_AWAY_READ_SOURCE}, PUT_AWAY_CONFIRM_SOURCE=${PUT_AWAY_CONFIRM_SOURCE}, ` +
-          `PUT_AWAY_SPLIT_SOURCE=${PUT_AWAY_SPLIT_SOURCE}, BIN_INQUIRY_SOURCE=${BIN_INQUIRY_SOURCE}`
+          `PUT_AWAY_SPLIT_SOURCE=${PUT_AWAY_SPLIT_SOURCE}, BIN_INQUIRY_SOURCE=${BIN_INQUIRY_SOURCE}, ` +
+          `PICK_READ_SOURCE=${PICK_READ_SOURCE}, PICK_CONFIRM_SOURCE=${PICK_CONFIRM_SOURCE}`
         : '';
     throw new Error(
       `Business Central is in use (DATA_SOURCE=${DATA_SOURCE}${hybridDetail}) ` +
@@ -125,6 +142,8 @@ module.exports = {
   putAwayConfirmSource: PUT_AWAY_CONFIRM_SOURCE,
   putAwaySplitSource: PUT_AWAY_SPLIT_SOURCE,
   binInquirySource: BIN_INQUIRY_SOURCE,
+  pickReadSource: PICK_READ_SOURCE,
+  pickConfirmSource: PICK_CONFIRM_SOURCE,
   jwt: {
     secret: required('JWT_SECRET'),
     expiresIn: process.env.JWT_EXPIRES_IN || '12h',
