@@ -852,8 +852,8 @@ class BusinessCentralDataSource {
         return {
           sku: line.itemNo,
           description: line.itemDesc,
-          // What the operator still has to take. The line's full quantity
-          // is kept separately (bcQuantity) for display/diagnostics.
+          // The operator's scan target: qtyOutstanding (what is still to be
+          // scanned). quantity is what the document handles in total.
           qty: outstanding,
           // Bin to take FROM. Business Central suggests one; the operator
           // may take from another bin holding the same stock (BC moves or
@@ -872,11 +872,18 @@ class BusinessCentralDataSource {
             line.isScannable !== false ||
             (SERIAL_LINES_SCANNABLE && line.isSerialTracked === true && !!norm(line.serialNo)),
           destinationBin: placeBinByKey.get(trackingKey(line)) || null,
-          bcQuantity: line.quantity,
-          // Business Central's current Qty. to Handle on the line. Carried
-          // through for diagnostics only — the app's progress is its own
-          // local scan state (see the status note below).
-          bcQtyToHandle: typeof line.qtyToHandle === 'number' ? line.qtyToHandle : null,
+          // Business Central's own quantity fields, under their Business
+          // Central names, so an item in the middleware dump can be matched
+          // to its line in the raw response:
+          //   quantity       — what the document is to handle (line total)
+          //   qtyOutstanding — what the operator is to scan (= qty above)
+          //   qtyHandled     — already registered (live data; not in the doc)
+          //   qtyToHandle    — currently set to handle; posted by Register
+          // The app shows quantity and qtyOutstanding; scans count to qty.
+          quantity: typeof line.quantity === 'number' ? line.quantity : null,
+          qtyHandled: typeof line.qtyHandled === 'number' ? line.qtyHandled : null,
+          qtyOutstanding: typeof line.qtyOutstanding === 'number' ? line.qtyOutstanding : null,
+          qtyToHandle: typeof line.qtyToHandle === 'number' ? line.qtyToHandle : null,
         };
       })
       .filter((item) => item.qty > 0);

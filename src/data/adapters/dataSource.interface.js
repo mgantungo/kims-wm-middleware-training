@@ -167,10 +167,13 @@
  *   PickLineItem: { sku, description, qty, location,
  *     // Business Central only (additive):
  *     bcLineId, lineNo, variantCode, lotNo, serialNo, isLotTracked,
- *     isSerialTracked, scannable, destinationBin, bcQtyToHandle }
+ *     isSerialTracked, scannable, destinationBin,
+ *     quantity, qtyHandled, qtyOutstanding, qtyToHandle }
+ *   quantity = what the document is to handle; qtyOutstanding = what the
+ *   operator is to scan (and is what qty carries).
  *   Business Central: Section 2.5, GET picks?$expand=pickLines. Only Take
  *   lines become items (BC syncs Place lines itself, Section 2.9.5); qty
- *   is qtyOutstanding; picks with nothing outstanding are omitted.
+ *   is qtyOutstanding (the scan target); picks with nothing outstanding are omitted.
  *   status is always 'assigned' from a BC read — qtyToHandle's meaning
  *   on an untouched line is not yet confirmed against live data (see
  *   businessCentralDataSource.js's _mapPick), so progress stays with the
