@@ -913,7 +913,7 @@ class BusinessCentralDataSource {
     // it shows in the terminal while Pick is verified against live data.
     logger.info({ rawBcResponse: data }, 'Raw Business Central response — GET picks?$expand=pickLines');
     const documents = (data.value || []).map((p) => this._mapPick(p)).filter(Boolean);
-    logger.info({ picks: documents.map((d) => this._summarizePick(d)) }, `Pick documents sent to app: ${documents.length}`);
+    logger.info({ pickDocuments: documents }, `Pick documents sent to app: ${documents.length}`);
     return { documents };
   }
 
@@ -926,23 +926,8 @@ class BusinessCentralDataSource {
     if (!match) throw ApiError.notFound(`Pick document "${docId}" not found.`);
     const mapped = this._mapPick(match);
     if (!mapped) throw ApiError.notFound(`Pick document "${docId}" has nothing left to pick.`);
+    logger.info({ pickDocument: mapped }, `Pick document sent to app: ${docId}`);
     return mapped;
-  }
-
-  /// One compact line per pick for the terminal: header plus each item as
-  /// "sku lot/serial qty @ bin -> staging [lineId]".
-  _summarizePick(doc) {
-    return {
-      docId: doc.docId,
-      bcPickId: doc.bcPickId,
-      locationCode: doc.locationCode,
-      assignedUserId: doc.assignedUserId,
-      stagingBins: doc.stagingBins,
-      items: doc.items.map((i) => {
-        const tracking = i.serialNo ? ` serial ${i.serialNo}` : i.lotNo ? ` lot ${i.lotNo}` : '';
-        return `${i.sku}${tracking} qty ${i.qty} @ ${i.location || '(no bin)'} -> ${i.destinationBin || '?'} [${i.bcLineId}]`;
-      }),
-    };
   }
 
   /// Fresh read of one pick's lines, keyed by line id. Used to fill in
