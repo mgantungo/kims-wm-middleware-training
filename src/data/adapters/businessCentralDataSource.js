@@ -908,20 +908,41 @@ class BusinessCentralDataSource {
 
   async getPickDocuments() {
     const data = await this._bcGet('picks?$expand=pickLines');
-    logger.debug({ rawBcResponse: data }, 'Raw Business Central response — GET picks?$expand=pickLines');
-    return { documents: (data.value || []).map((p) => this._mapPick(p)).filter(Boolean) };
+    // Same diagnostic as getPutAwayDocuments: the exact, unmapped response,
+    // then one summary line per pick as the app will see it. Info level so
+    // it shows in the terminal while Pick is verified against live data.
+    logger.info({ rawBcResponse: data }, 'Raw Business Central response — GET picks?$expand=pickLines');
+    const documents = (data.value || []).map((p) => this._mapPick(p)).filter(Boolean);
+    logger.info({ picks: documents.map((d) => this._summarizePick(d)) }, `Pick documents sent to app: ${documents.length}`);
+    return { documents };
   }
 
   async getPickDocument(docId) {
     if (!docId) throw ApiError.badRequest('docId is required.');
     const escaped = String(docId).replace(/'/g, "''");
     const data = await this._bcGet(`picks?$expand=pickLines&$filter=no eq '${escaped}'`);
-    logger.debug({ docId, rawBcResponse: data }, 'Raw Business Central response — GET picks (single document)');
+    logger.info({ docId, rawBcResponse: data }, 'Raw Business Central response — GET picks (single document)');
     const match = (data.value || [])[0];
     if (!match) throw ApiError.notFound(`Pick document "${docId}" not found.`);
     const mapped = this._mapPick(match);
     if (!mapped) throw ApiError.notFound(`Pick document "${docId}" has nothing left to pick.`);
     return mapped;
+  }
+
+  /// One compact line per pick for the terminal: header plus each item as
+  /// "sku lot/serial qty @ bin -> staging [lineId]".
+  _summarizePick(doc) {
+    return {
+      docId: doc.docId,
+      bcPickId: doc.bcPickId,
+      locationCode: doc.locationCode,
+      assignedUserId: doc.assignedUserId,
+      stagingBins: doc.stagingBins,
+      items: doc.items.map((i) => {
+        const tracking = i.serialNo ? ` serial ${i.serialNo}` : i.lotNo ? ` lot ${i.lotNo}` : '';
+        return `${i.sku}${tracking} qty ${i.qty} @ ${i.location || '(no bin)'} -> ${i.destinationBin || '?'} [${i.bcLineId}]`;
+      }),
+    };
   }
 
   /// Fresh read of one pick's lines, keyed by line id. Used to fill in
@@ -1006,7 +1027,9 @@ class BusinessCentralDataSource {
       if (lotNo) body.scannedLotNo = lotNo;
     }
 
+    logger.info({ bcLineId, body }, 'Pick scan → Business Central UpdateLineScan');
     const updatedLine = await this._bcPost(`pickLines(${bcLineId})/Microsoft.NAV.UpdateLineScan`, body);
+    logger.info({ bcLineId, bcLine: updatedLine }, 'Pick scan accepted by Business Central');
     return { ok: true, bcLine: updatedLine };
   }
 
@@ -1081,13 +1104,16 @@ class BusinessCentralDataSource {
         if (scan.lotNo) e.lotNo = scan.lotNo;
         return e;
       });
+      logger.info({ bcPickId, scanEntries }, `Pick batch → Business Central ProcessBatchScans (${scanEntries.length} entries)`);
       await this._bcPost(`picks(${bcPickId})/Microsoft.NAV.ProcessBatchScans`, {
         scannedPayload: JSON.stringify(scanEntries),
       });
+      logger.info({ bcPickId }, 'Pick batch accepted by Business Central');
     }
 
     let registerOutcome;
     try {
+      logger.info({ bcPickId }, 'Pick → Business Central Register');
       await this._bcPost(`picks(${bcPickId})/Microsoft.NAV.Register`, {});
       logger.info({ bcPickId }, 'Pick registered after batch confirm');
       registerOutcome = { registerAttempted: true, registered: true, registerError: null };
@@ -1110,7 +1136,9 @@ class BusinessCentralDataSource {
         'registerPick requires bcPickId — this pick was not read from Business Central, so there is no pick to register.',
       );
     }
+    logger.info({ bcPickId }, 'Pick → Business Central Register (manual)');
     await this._bcPost(`picks(${bcPickId})/Microsoft.NAV.Register`, {});
+    logger.info({ bcPickId }, 'Pick registered (manual)');
     return { ok: true };
   }
 
