@@ -4,9 +4,14 @@ const ApiError = require('../../utils/apiError');
 const { assertVisible } = require('../../utils/locationAccess');
 
 async function item(req, res) {
-  const q = req.query.q;
+  const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
   if (!q) throw ApiError.badRequest('Query parameter "q" is required.');
-  const result = await dataSource.searchItem(q);
+  // Same precedence as bin() below: the operator's own verified location
+  // always wins; a client-supplied locationCode is only used when the
+  // operator has none yet. Business Central returns the item's stock in
+  // every location (Section 2.3.1); the adapter keeps only this one.
+  const locationCode = (req.user && req.user.locationCode) || req.query.locationCode;
+  const result = await dataSource.searchItem(q, { locationCode });
   res.json(result);
 }
 

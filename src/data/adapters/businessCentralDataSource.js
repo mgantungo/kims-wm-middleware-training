@@ -47,6 +47,22 @@ const SERIAL_LINES_SCANNABLE = process.env.SERIAL_LINES_SCANNABLE !== 'false';
 const PUT_AWAY_REGISTER_PER_BIN = process.env.PUT_AWAY_REGISTER_PER_BIN === 'true';
 
 /**
+ * How long Item Inquiry keeps the Section 2.3 item catalog (GET items)
+ * before downloading it again — see _getItemCatalog. 10 minutes by
+ * default; ITEM_CATALOG_TTL_MS overrides it (0 = always re-download).
+ */
+const ITEM_CATALOG_TTL_MS = Number.isFinite(Number(process.env.ITEM_CATALOG_TTL_MS))
+  ? Number(process.env.ITEM_CATALOG_TTL_MS)
+  : 10 * 60 * 1000;
+
+/// Business Central decimals arrive as numbers, but be safe with strings
+/// and blanks — a missing quantity is 0, never NaN.
+function toNumber(v) {
+  const n = typeof v === 'number' ? v : Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/**
  * Implements the exact same method surface as DemoDataSource (see
  * dataSource.interface.js) so that flipping DATA_SOURCE=businessCentral in
  * .env is the *only* change needed to switch — no route or controller code
@@ -62,6 +78,8 @@ const PUT_AWAY_REGISTER_PER_BIN = process.env.PUT_AWAY_REGISTER_PER_BIN === 'tru
  * getPickDocuments/getPickDocument (v2 doc Section 2.5), confirmPickItem
  * (2.9 UpdateLineScan), confirmPickBatch (2.10 ProcessBatchScans + 2.11
  * Register) and registerPick (2.11) — see the Pick section below.
+ * Item Inquiry (2026-10): searchItem (Section 2.3.1 itemInquiries, by
+ * barcode, then item number, then name via the 2.3 catalog).
  *
  * Still `_notImplemented()`: validatePutAwayBin/suggestPutAwayBin. Not an
  * oversight — the documented /Bins endpoint has no capacity field, so
@@ -1188,7 +1206,179 @@ class BusinessCentralDataSource {
   async submitVerifyPack() { return this._notImplemented('submitVerifyPack'); }
   async confirmShipLoad() { return this._notImplemented('confirmShipLoad'); }
   async generateGatePass() { return this._notImplemented('generateGatePass'); }
-  async searchItem() { return this._notImplemented('searchItem'); }
+  // ------------------------------------------------------------------
+  // Item Inquiry — KIMS-WM API doc v2, Section 2.3.1
+  // (GET itemInquiries?$filter=barcodeFilter eq '...' | itemNo eq '...').
+  //
+  // One call returns the item's whole stock position: one line per
+  // location / zone / bin / variant / lot / serial, quantities already
+  // totalled, zero and negative lines left out by Business Central. Every
+  // line belongs to the same item. A barcode tied to a variant returns
+  // only that variant's stock.
+  //
+  // What the operator types or scans is tried in this order:
+  //   1. as a barcode (barcodeFilter) — the normal case, a label scan;
+  //   2. as an item number (itemNo) — typed or scanned item codes;
+  //   3. as part of an item NAME, against the Section 2.3 catalog — the
+  //      screen offers "search by name". itemInquiries itself cannot
+  //      search by name, so a single matching item is then looked up by
+  //      its number; several matches come back as a clear message asking
+  //      for the barcode or number instead of silently picking one.
+  // Business Central answers an unknown barcode / item with an error
+  // ("Barcode X could not be found." / "Item X could not be found."); that
+  // is treated as "no match, try the next way", never as a failure.
+  // ------------------------------------------------------------------
+
+  /// Stock lines for one barcode or item number, or null when Business
+  /// Central says it could not be found. The filter is URL-encoded, as
+  /// the doc asks (spaces as %20, quotes as %27), so a barcode containing
+  /// &, #, a quote or a space cannot break the query.
+  async _fetchItemInquiry(field, value) {
+    const escaped = String(value).replace(/'/g, "''");
+    const expr = encodeURIComponent(`${field} eq '${escaped}'`).replace(/'/g, '%27');
+    const path = `itemInquiries?$filter=${expr}`;
+    try {
+      const data = await this._bcGet(path);
+      logger.debug({ field, value, rawBcResponse: data }, 'Raw Business Central response — GET itemInquiries');
+      return data.value || [];
+    } catch (error) {
+      if (/could not be found/i.test(error.message || '')) return null;
+      throw error;
+    }
+  }
+
+  /// Section 2.3 (GET items) catalog, cached for ITEM_CATALOG_TTL_MS.
+  /// Used for the name search and for the item's UoM / tracking flags,
+  /// which itemInquiries does not return. Item master data changes
+  /// rarely; re-downloading the whole catalog on every scan would be the
+  /// slowest part of each inquiry. A failed refresh keeps serving the
+  /// previous copy if there is one, or an empty list — an inquiry never
+  /// fails because of it.
+  async _getItemCatalog() {
+    const now = Date.now();
+    if (this._itemCatalog && now - this._itemCatalog.fetchedAt < ITEM_CATALOG_TTL_MS) {
+      return this._itemCatalog.items;
+    }
+    try {
+      const data = await this._bcGet('items');
+      this._itemCatalog = { items: data.value || [], fetchedAt: now };
+    } catch (error) {
+      logger.warn({ err: error }, 'Item catalog (GET items) unavailable — continuing without it');
+      if (!this._itemCatalog) return [];
+    }
+    return this._itemCatalog.items;
+  }
+
+  /// Item Inquiry's lookup. [query] is whatever was scanned or typed.
+  /// [locationCode] (the operator's own, from the JWT) limits the stock
+  /// lines to that location, the same scoping Bin Inquiry and Put Away
+  /// use; without one, every location is shown.
+  async searchItem(query, { locationCode } = {}) {
+    const q = String(query || '').trim();
+    if (!q) throw ApiError.badRequest('Scan an item barcode or enter an item number or name.');
+
+    let matchedBy = 'barcode';
+    let lines = await this._fetchItemInquiry('barcodeFilter', q);
+
+    if (lines === null || lines.length === 0) {
+      // Item numbers are Business Central Code fields, stored upper-case.
+      const byNumber = await this._fetchItemInquiry('itemNo', q.toUpperCase());
+      if (byNumber !== null) {
+        matchedBy = 'itemNo';
+        lines = byNumber;
+      }
+    }
+
+    const catalog = await this._getItemCatalog();
+    let catalogItem = null;
+
+    if (lines === null) {
+      const needle = q.toLowerCase();
+      const byName = needle.length >= 3
+        ? catalog.filter((i) => String(i.item_name || '').toLowerCase().includes(needle))
+        : [];
+      if (byName.length === 0) {
+        throw ApiError.notFound(`No item matches "${q}" by barcode, item number or name.`);
+      }
+      if (byName.length > 1) {
+        const shown = byName.slice(0, 5).map((i) => `${i.item_no} (${i.item_name})`).join(', ');
+        const more = byName.length > 5 ? ` and ${byName.length - 5} more` : '';
+        throw ApiError.badRequest(
+          `${byName.length} items match "${q}": ${shown}${more}. Scan the barcode or enter the item number.`,
+        );
+      }
+      catalogItem = byName[0];
+      matchedBy = 'name';
+      lines = (await this._fetchItemInquiry('itemNo', catalogItem.item_no)) || [];
+    }
+
+    const itemNo = (lines[0] && lines[0].itemNo) || (catalogItem && catalogItem.item_no) || q.toUpperCase();
+    catalogItem = catalogItem || catalog.find((i) => i.item_no === itemNo) || null;
+
+    return this._mapItemInquiry({ query: q, matchedBy, itemNo, lines, catalogItem, locationCode });
+  }
+
+  /// Maps Section 2.3.1's stock lines onto the app's ItemInquiryResult.
+  /// Keeps the fields the app already reads (sku, name, and per line:
+  /// zone, location, bin, qty, batch) and adds Business Central's own
+  /// detail. receivedDate / receivedBy (demo data only) are NOT sent:
+  /// itemInquiries has no receipt date or user, and a made-up value would
+  /// mislead the operator.
+  _mapItemInquiry({ query, matchedBy, itemNo, lines, catalogItem, locationCode }) {
+    const norm = (v) => String(v || '').trim();
+    const scoped = locationCode
+      ? lines.filter((l) => norm(l.locationCode).toUpperCase() === norm(locationCode).toUpperCase())
+      : lines;
+
+    const stockLines = scoped
+      .map((l) => ({
+        zone: norm(l.zoneCode),
+        location: norm(l.locationCode),
+        bin: norm(l.binCode),
+        qty: toNumber(l.quantity),
+        // The app's single "batch" column: lot, else serial.
+        batch: norm(l.lotNo) || norm(l.serialNo),
+        lotNo: norm(l.lotNo),
+        serialNo: norm(l.serialNo),
+        palletNo: norm(l.palletNo),
+        variantCode: norm(l.variantCode),
+      }))
+      .sort((a, b) =>
+        [a.location, a.zone, a.bin, a.lotNo, a.serialNo].join('|').localeCompare(
+          [b.location, b.zone, b.bin, b.lotNo, b.serialNo].join('|'),
+        ));
+
+    const variants = [...new Set(lines.map((l) => norm(l.variantCode)))];
+    const first = lines[0] || {};
+
+    const result = {
+      sku: itemNo,
+      name: norm(first.itemDescription) || (catalogItem && catalogItem.item_name) || itemNo,
+      stockLines,
+      matchedBy, // 'barcode' | 'itemNo' | 'name'
+      query,
+      // Set when the barcode is tied to one variant (Section 2.3.1:
+      // results are limited to that variant).
+      variantCode: matchedBy === 'barcode' && variants.length === 1 && variants[0] ? variants[0] : null,
+      locationCode: locationCode || null,
+      summary: {
+        totalQty: stockLines.reduce((sum, l) => sum + l.qty, 0),
+        lineCount: stockLines.length,
+        binCount: new Set(stockLines.filter((l) => l.bin).map((l) => `${l.location}|${l.bin}`)).size,
+        lotCount: new Set(stockLines.filter((l) => l.lotNo).map((l) => l.lotNo)).size,
+        locationCount: new Set(stockLines.map((l) => l.location)).size,
+      },
+      lastSyncedAt: new Date().toISOString(),
+    };
+
+    if (catalogItem) {
+      result.uom = catalogItem.UoM || null;
+      result.hasVariants = catalogItem.has_variants === true;
+      result.hasBatches = catalogItem.has_batches === true;
+      result.hasSerials = catalogItem.has_serials === true;
+    }
+    return result;
+  }
 
   /// Maps onto Section 2.2, GET /Bins, filtered to one bin code.
   ///

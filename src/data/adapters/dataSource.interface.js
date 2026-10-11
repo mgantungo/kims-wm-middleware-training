@@ -223,7 +223,28 @@
  *   this field themselves unless they want to.
  * confirmShipLoad(payload)              -> { ok: true }
  * generateGatePass(payload)             -> GatePass
- * searchItem(query)                     -> ItemInquiryResult
+ * searchItem(query, { locationCode? })  -> ItemInquiryResult
+ *   Item Inquiry. [query] is whatever was scanned or typed: tried as a
+ *   barcode, then an item number, then part of an item name (a single
+ *   name match only; several matches -> 400 listing them; none -> 404).
+ *   [locationCode] (the operator's own, from the JWT) limits stockLines
+ *   to that location.
+ *   Business Central: Section 2.3.1 — GET itemInquiries?$filter=
+ *   barcodeFilter eq '...' (or itemNo eq '...'); name search and the
+ *   uom / tracking flags come from Section 2.3 (GET items), cached 10 min.
+ *   Shape:
+ *     { sku, name, stockLines: ItemStockLine[],
+ *       // additive (Business Central only — absent from demo):
+ *       matchedBy: 'barcode' | 'itemNo' | 'name', query, variantCode,
+ *       locationCode, uom?, hasVariants?, hasBatches?, hasSerials?,
+ *       summary: { totalQty, lineCount, binCount, lotCount, locationCount },
+ *       lastSyncedAt }
+ *   ItemStockLine: { zone, location, bin, qty, batch,
+ *     // Business Central only: lotNo, serialNo, palletNo, variantCode
+ *     // Demo only: receivedDate, receivedBy (no BC source — not sent) }
+ *   qty can be a decimal. An item that exists but has no stock (at this
+ *   location) comes back with an empty stockLines, not a 404.
+ *   demoDataSource.js ignores both arguments and returns a fixed item.
  * searchBin(code, { locationCode? })    -> BinInquiryResult
  *   Bin Inquiry's primary action — the operator scans the bin in front
  *   of them. [code] is whatever was scanned or typed and is matched

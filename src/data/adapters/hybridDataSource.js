@@ -10,7 +10,7 @@ const BusinessCentralDataSource = require('./businessCentralDataSource');
  * breaks every module Business Central integration hasn't reached yet
  * (Transfer, Quarantine, Verify & Pack, etc. all throw BC_NOT_IMPLEMENTED
  * the moment that flag flips). Migrated so far: Put Away, Bin Inquiry,
- * Pick.
+ * Pick, Item Inquiry.
  *
  * Put Away's read (getPutAwayDocuments/getPutAwayDocument) and confirm
  * (confirmPutAwayItem) are routed INDEPENDENTLY, each behind its own env
@@ -35,6 +35,7 @@ class HybridDataSource {
     binInquirySource,
     pickReadSource,
     pickConfirmSource,
+    itemInquirySource,
   }) {
     this._demo = demoDataSource;
     this._bc = new BusinessCentralDataSource(businessCentralConfig);
@@ -58,6 +59,9 @@ class HybridDataSource {
     // other than 'businessCentral' (including unset) means demo.
     this._pickReadSource = pickReadSource || process.env.PICK_READ_SOURCE || 'demo';
     this._pickConfirmSource = pickConfirmSource || process.env.PICK_CONFIRM_SOURCE || 'demo';
+    // Item Inquiry — its own read-only module, same pattern as Bin
+    // Inquiry: one flag, no confirm side.
+    this._itemInquirySource = itemInquirySource || process.env.ITEM_INQUIRY_SOURCE || 'demo';
   }
 
   /// For the startup log line, so the terminal shows where Pick is routed.
@@ -83,6 +87,10 @@ class HybridDataSource {
 
   _pickConfirmTarget() {
     return this._pickConfirmSource === 'businessCentral' ? this._bc : this._demo;
+  }
+
+  _itemInquiryTarget() {
+    return this._itemInquirySource === 'businessCentral' ? this._bc : this._demo;
   }
 
   _binInquiryTarget() {
@@ -174,7 +182,13 @@ class HybridDataSource {
   async submitVerifyPack(...args) { return this._demo.submitVerifyPack(...args); }
   async confirmShipLoad(...args) { return this._demo.confirmShipLoad(...args); }
   async generateGatePass(...args) { return this._demo.generateGatePass(...args); }
-  async searchItem(...args) { return this._demo.searchItem(...args); }
+
+  /// Item Inquiry — routed by ITEM_INQUIRY_SOURCE. Read-only. Second
+  /// argument ({ locationCode }) passes straight through; see
+  /// businessCentralDataSource.js's searchItem (Section 2.3.1).
+  async searchItem(...args) {
+    return this._itemInquiryTarget().searchItem(...args);
+  }
 
   /// Independently routable — a read-only lookup, not tied to Put Away's
   /// read/confirm flags at all (Bin Inquiry is its own module). Second

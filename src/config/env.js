@@ -92,6 +92,13 @@ if (!['demo', 'businessCentral'].includes(PICK_CONFIRM_SOURCE)) {
   throw new Error(`PICK_CONFIRM_SOURCE must be "demo" or "businessCentral", got "${PICK_CONFIRM_SOURCE}"`);
 }
 
+// Item Inquiry — its own read-only module (Section 2.3.1 itemInquiries),
+// independent of Bin Inquiry. demo | businessCentral.
+const ITEM_INQUIRY_SOURCE = process.env.ITEM_INQUIRY_SOURCE || 'demo';
+if (!['demo', 'businessCentral'].includes(ITEM_INQUIRY_SOURCE)) {
+  throw new Error(`ITEM_INQUIRY_SOURCE must be "demo" or "businessCentral", got "${ITEM_INQUIRY_SOURCE}"`);
+}
+
 // Business Central uses HTTP Basic Auth (username + Web Service Access
 // Key), not OAuth2 — see the KIMS-WM API Endpoint Reference doc, Section
 // 1. Only required when Business Central is ACTUALLY reachable through
@@ -114,7 +121,8 @@ const businessCentralInUse =
       PUT_AWAY_SPLIT_SOURCE === 'businessCentral' ||
       BIN_INQUIRY_SOURCE === 'businessCentral' ||
       PICK_READ_SOURCE === 'businessCentral' ||
-      PICK_CONFIRM_SOURCE === 'businessCentral'));
+      PICK_CONFIRM_SOURCE === 'businessCentral' ||
+      ITEM_INQUIRY_SOURCE === 'businessCentral'));
 
 if (businessCentralInUse) {
   const missing = Object.entries(businessCentral)
@@ -125,7 +133,8 @@ if (businessCentralInUse) {
       DATA_SOURCE === 'hybrid'
         ? `, PUT_AWAY_READ_SOURCE=${PUT_AWAY_READ_SOURCE}, PUT_AWAY_CONFIRM_SOURCE=${PUT_AWAY_CONFIRM_SOURCE}, ` +
           `PUT_AWAY_SPLIT_SOURCE=${PUT_AWAY_SPLIT_SOURCE}, BIN_INQUIRY_SOURCE=${BIN_INQUIRY_SOURCE}, ` +
-          `PICK_READ_SOURCE=${PICK_READ_SOURCE}, PICK_CONFIRM_SOURCE=${PICK_CONFIRM_SOURCE}`
+          `PICK_READ_SOURCE=${PICK_READ_SOURCE}, PICK_CONFIRM_SOURCE=${PICK_CONFIRM_SOURCE}, ` +
+          `ITEM_INQUIRY_SOURCE=${ITEM_INQUIRY_SOURCE}`
         : '';
     throw new Error(
       `Business Central is in use (DATA_SOURCE=${DATA_SOURCE}${hybridDetail}) ` +
@@ -144,6 +153,7 @@ module.exports = {
   binInquirySource: BIN_INQUIRY_SOURCE,
   pickReadSource: PICK_READ_SOURCE,
   pickConfirmSource: PICK_CONFIRM_SOURCE,
+  itemInquirySource: ITEM_INQUIRY_SOURCE,
   jwt: {
     secret: required('JWT_SECRET'),
     expiresIn: process.env.JWT_EXPIRES_IN || '12h',
