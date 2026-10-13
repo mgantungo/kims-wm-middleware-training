@@ -62,6 +62,10 @@
  * confirmPutAwayBatch(payload)          -> { ok: true }
  *   payload: { docId, bcPutAwayId?, entries: [{ sku, bcLineId?, location,
  *   qty, scanLog? }] }
+ *   SAVES ONLY — never registers. businessCentralDataSource.js still
+ *   returns registerAttempted: false (with registered: false,
+ *   registerError: null) so older app builds that read those fields keep
+ *   working.
  *   Maps onto Section 2.7's Microsoft.NAV.ProcessBatchScans — replaces
  *   N separate confirmPutAwayItem calls with one call per bin/document,
  *   per product decision (line-per-line was resource-intensive on
@@ -143,21 +147,16 @@
  *   Whole-document "Register" event — maps onto Business Central's POST
  *   .../putAways(bcPutAwayId)/Microsoft.NAV.Register (Section 2.6), its
  *   own equivalent of pressing "Register" once every line on the
- *   document has been handled. Called right after a document's last
- *   line is confirmed (see PutAwayItemController.
- *   _refreshAfterConfirmation / PutAwayRepository.registerDocument),
- *   and ALSO as a PARTIAL register right after Split Bin pushes an
- *   item's scanned quantity (PutAwayRepository.registerPartialNow) —
- *   Business Central registers what is currently set to handle on each
- *   line and leaves the remainder outstanding (qtyHandled /
- *   qtyOutstanding). The final one is replayed from the sync outbox
- *   like confirmPutAwayItem, since no operator is standing at a bin
- *   waiting on it; the partial one is a direct, awaited call, because
- *   the operator is waiting on its outcome at the "Scan New Bin?" prompt. demoData-
- *   Source.js's version is a trivial no-op ({ ok: true }): a demo
- *   document is already fully described by doc.status flipping to
- *   'complete' once every item is confirmed, with no separate posting
- *   step to model.
+ *   document has been handled. MANUAL ONLY: called when the operator taps
+ *   Register in the app, which the app allows only once every line of
+ *   the document has been saved to Business Central (no put-away
+ *   transaction still pending or failed — see PutAwayRepository.
+ *   registerDocumentAwaited). Nothing registers automatically any more:
+ *   confirmPutAwayBatch only saves, Split Bin only saves, and the list
+ *   screen no longer registers complete documents on load. Replayed from
+ *   the sync outbox and awaited, so the operator sees Business Central's
+ *   real answer. demoDataSource.js's version is a trivial no-op
+ *   ({ ok: true }).
  * getPickDocuments()                    -> { documents: PickDocument[] }
  * getPickDocument(docId)                -> PickDocument
  *   PickDocument: { docId, shipmentRef, dueDate, status, isHighPriority,

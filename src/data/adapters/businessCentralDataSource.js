@@ -28,23 +28,17 @@ const logger = require('../../utils/logger');
 const SERIAL_LINES_SCANNABLE = process.env.SERIAL_LINES_SCANNABLE !== 'false';
 
 /**
- * REGISTER AS YOU GO — OFF BY DEFAULT.
+ * PUT-AWAY REGISTER IS MANUAL ONLY.
  *
- * Normally a put-away is registered once, when its last line is done.
- * Setting PUT_AWAY_REGISTER_PER_BIN=true makes the middleware also try to
- * register right after each confirmed bin, so what was put away posts to
- * Business Central immediately instead of waiting for the whole document.
- *
- * It is guarded: Register posts EVERYTHING currently set to handle on the
- * document, not just what was just confirmed, so it only runs when the
- * quantity Business Central has pending equals exactly what was just
- * confirmed (and every line with quantity has a bin). Otherwise it is
- * skipped and says why. It is off by default because Business Central has
- * been seen to refill Qty. to Handle on the remaining lines after a
- * Register (WHPA-000169), which makes the NEXT bin's push conflict; with
- * the switch on, that shows up as a clear message instead of a surprise.
+ * confirmPutAwayBatch only SAVES scans to Business Central — it never
+ * registers. Per product decision, Register runs only when the operator
+ * taps the Register button in the app, and the app only offers that
+ * button once every line of the document is saved to Business Central
+ * (see PutAwayRepository.registerDocumentAwaited). The old automatic
+ * paths — register when the last bin lands (_tryAutoRegister) and the
+ * PUT_AWAY_REGISTER_PER_BIN "register as you go" switch — are removed.
+ * PUT_AWAY_REGISTER_PER_BIN is now ignored if still set in .env.
  */
-const PUT_AWAY_REGISTER_PER_BIN = process.env.PUT_AWAY_REGISTER_PER_BIN === 'true';
 
 /**
  * How long Item Inquiry keeps the Section 2.3 item catalog (GET items)
@@ -633,26 +627,10 @@ class BusinessCentralDataSource {
       });
     }
 
-    // Per product decision: every time a bin's batch is successfully
-    // pushed to Business Central, the middleware attempts to register the
-    // whole put-away right away if that batch happened to be the last
-    // thing the document needed. Deliberately AWAITED, not fire-and-
-    // forget — the operator needs to actually know whether it worked, not
-    // just have it happen silently in the background. The batch confirm
-    // itself already succeeded by this point regardless of what happens
-    // next, so a register outcome (attempted, succeeded, or failed) is
-    // reported alongside it rather than thrown — a failed or skipped
-    // register must never make the app think the bin confirm itself
-    // failed, which would risk it being retried unnecessarily.
-    let registerOutcome = await this._tryAutoRegister(bcPutAwayId);
-    if (PUT_AWAY_REGISTER_PER_BIN && !registerOutcome.registerAttempted) {
-      registerOutcome = await this._tryPartialRegister(
-        bcPutAwayId,
-        entries.reduce((sum, e) => sum + Number(e.qty || 0), 0),
-      );
-    }
-
-    return { ok: true, held: held.length, ...registerOutcome };
+    // Saves only — never registers (see the note at the top of this file).
+    // registerAttempted/registered/registerError are still returned, always
+    // "not attempted", so an older app build that reads them keeps working.
+    return { ok: true, held: held.length, registerAttempted: false, registered: false, registerError: null };
   }
 
   /// Compares each entry with what Business Central ALREADY has on that
@@ -708,79 +686,14 @@ class BusinessCentralDataSource {
     return { toSend, held };
   }
 
-  /// REGISTER AS YOU GO (see PUT_AWAY_REGISTER_PER_BIN). Registers only
-  /// when it is safe: Register posts whatever is set to handle on EVERY
-  /// line, so the document's total pending quantity must equal what was
-  /// just confirmed, and every line with quantity must have a bin.
-  /// Returns a result rather than throwing — a skipped or failed register
-  /// is information, never a reason to think the confirm itself failed.
-  async _tryPartialRegister(bcPutAwayId, expectedPending) {
-    const data = await this._bcGet(`putAways(${bcPutAwayId})?$expand=putAwayLines`);
-    const place = ((data && data.putAwayLines) || []).filter((l) => l.actionType === 'Place');
-    const pending = place.reduce((sum, l) => sum + Number(l.qtyToHandle || 0), 0);
-    if (pending !== expectedPending) {
-      return {
-        registerAttempted: false,
-        registered: false,
-        registerError:
-          `Not registered yet: Business Central has ${pending} set to handle across the document but ` +
-          `${expectedPending} was just confirmed — registering would post quantities that were not scanned.`,
-      };
-    }
-    const noBin = place.find((l) => Number(l.qtyToHandle || 0) > 0 && !String(l.binCode || '').trim());
-    if (noBin) {
-      return {
-        registerAttempted: false,
-        registered: false,
-        registerError: `Not registered yet: line ${noBin.lineNo} has quantity set to handle but no bin.`,
-      };
-    }
-    logger.info({ bcPutAwayId, pending }, 'Register-per-bin: pending matches what was confirmed — registering');
-    try {
-      await this._bcPost(`putAways(${bcPutAwayId})/Microsoft.NAV.Register`, {});
-      return { registerAttempted: true, registered: true, registerError: null };
-    } catch (error) {
-      logger.warn({ bcPutAwayId, err: error }, 'Register-per-bin attempt failed');
-      return { registerAttempted: true, registered: false, registerError: error.message || String(error) };
-    }
-  }
-
-  /// Re-reads the document fresh (not the batch-confirm response, which
-  /// carries no line detail) and reuses _mapPutAway's own status
-  /// computation — the same allDone/qtyToHandle criterion that already
-  /// decides "complete" everywhere else — so this can never drift from
-  /// what the rest of the app considers done. Returns a plain result
-  /// object rather than throwing on failure, since a failed or
-  /// not-applicable register here is information for the caller to
-  /// report, not an error in confirmPutAwayBatch's own contract.
-  async _tryAutoRegister(bcPutAwayId) {
-    const data = await this._bcGet(`putAways(${bcPutAwayId})?$expand=putAwayLines`);
-    const mapped = this._mapPutAway(data);
-    if (mapped.status !== 'complete') {
-      return { registerAttempted: false, registered: false, registerError: null };
-    }
-    logger.info({ bcPutAwayId }, 'Document complete after batch confirm — attempting auto-register');
-    try {
-      await this._bcPost(`putAways(${bcPutAwayId})/Microsoft.NAV.Register`, {});
-      logger.info({ bcPutAwayId }, 'Auto-register succeeded');
-      return { registerAttempted: true, registered: true, registerError: null };
-    } catch (error) {
-      logger.warn({ bcPutAwayId, err: error }, 'Auto-register-on-complete-bin attempt failed');
-      return { registerAttempted: true, registered: false, registerError: error.message || String(error) };
-    }
-  }
-
   /// Maps onto Section 2.8, "Register Put-Away" — POST
   /// .../putAways(bcPutAwayId)/Microsoft.NAV.Register, empty body, empty
   /// 200 response. Business Central's own equivalent of pressing
-  /// "Register". Called by the app in two situations: (1) once, right
-  /// after a document's last line is confirmed (see
-  /// PutAwayItemController._refreshAfterConfirmation /
-  /// PutAwayRepository.registerDocument), and (2) as a PARTIAL register,
-  /// right after Split Bin pushes an item's scanned quantity (see
-  /// PutAwayRepository.registerPartialNow) — Business Central registers
-  /// what is currently set to handle and leaves the remainder
-  /// outstanding, so a partial register is not an error in itself.
+  /// "Register". The ONLY place a put-away is registered: called when the
+  /// operator taps Register in the app, which the app allows only once
+  /// every line of the document has been saved to Business Central (see
+  /// PutAwayRepository.registerDocumentAwaited). Split Bin no longer
+  /// registers; confirmPutAwayBatch no longer registers.
   async registerPutAway(payload) {
     const { bcPutAwayId } = payload || {};
     if (!bcPutAwayId) {
