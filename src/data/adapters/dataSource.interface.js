@@ -185,11 +185,13 @@
  *   that already succeeded.
  * confirmPickBatch(payload)             -> { ok: true, registerAttempted,
  *                                            registered, registerError }
- *   payload: { docId, bcPickId?, entries: [{ sku, bcLineId?, location,
- *   qty, lotNo?, serialNo? }] } — same entry shape as confirmPutAwayBatch.
- *   Business Central: Section 2.10 ProcessBatchScans (all-or-nothing),
- *   then Section 2.11 Register straight after, since the app only sends a
- *   pick's batch once the whole pick is done. Register's outcome is
+ *   payload: { docId, bcPickId?, register?, entries: [{ sku, bcLineId?,
+ *   location, qty, cumulative?, lotNo?, serialNo? }] }. qty is the units
+ *   picked from that bin in this save (an increment); cumulative is all
+ *   saved on that line in that bin, this save included (resend check).
+ *   Business Central: Section 2.10 ProcessBatchScans (all-or-nothing).
+ *   register: false (Update Pick / Partial Pick) saves only; otherwise
+ *   Section 2.11 Register follows straight away. Register's outcome is
  *   reported, never thrown: the scans are already saved by then, and
  *   resending them would double-count. The same bcLineId may repeat
  *   (bin change mid-line triggers BC's own split, Section 2.10.4).
@@ -198,10 +200,12 @@
  *   item be taken from the bin the operator scanned? Business Central:
  *   Section 2.2.2 bin contents, scoped to the pick's location. Demo:
  *   always available. Routed by PICK_READ_SOURCE (read-only).
- * registerPick(payload)                 -> { ok: true }
- *   payload: { docId, bcPickId? } — Section 2.11, for a manual Register.
- *   Partial registration is allowed: unscanned quantity stays
- *   outstanding on the same pick.
+ * registerPick(payload)                 -> { ok: true, fullyRegistered }
+ *   payload: { docId, bcPickId?, partial?, expected? } — Section 2.11.
+ *   Partial registration is allowed: unsaved quantity stays outstanding
+ *   on the same pick. expected ([{ bcLineId, bin, qty }]) is what the app
+ *   saved and has not registered; when sent, Register is refused (409,
+ *   nothing posted) if Business Central's Qty. to Handle differs from it.
  *   payload.scanLog (optional): same shape as confirmPutAwayItem above.
  *
  * Scan exceptions (wrong item / wrong bin / item not on this document,

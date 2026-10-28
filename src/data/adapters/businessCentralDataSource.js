@@ -956,29 +956,48 @@ class BusinessCentralDataSource {
     return { ok: true, bcLine: updatedLine };
   }
 
+  /// The key Business Central pairs pick lines by (Section 2.9.5) and
+  /// carries over when it splits a Take line (Section 2.9.6): item,
+  /// variant, lot and serial. Upper-cased and trimmed so it compares the
+  /// same way the app does.
+  _pickTrackingKey(line) {
+    const n = (v) => String(v || '').trim().toUpperCase();
+    return [n(line.itemNo), n(line.variantCode), n(line.lotNo), n(line.serialNo)].join('|');
+  }
+
   /// Section 2.10 — POST picks(bcPickId)/Microsoft.NAV.ProcessBatchScans,
-  /// then Section 2.11 Register. The app sends a pick's batch once the
-  /// whole pick is done (architecture decision: batched per pick for BC
-  /// server performance), so Register follows straight away.
+  /// then (unless register === false) Section 2.11 Register.
   ///
-  /// Payload: { docId, bcPickId, entries: [{ sku, bcLineId, location,
-  /// qty, lotNo?, serialNo? }] }. Entries are sent in order and the same
-  /// bcLineId may repeat — a bin change mid-line is BC's own split
-  /// (Section 2.10.4), and serial lines arrive one unit per entry.
+  /// Payload: { docId, bcPickId, register?, entries: [{ sku, bcLineId,
+  /// location, qty, cumulative?, lotNo?, serialNo? }] }.
+  ///   qty ......... units picked from that bin in THIS save — Business
+  ///                 Central adds it to the line (an increment, 2.9/2.10).
+  ///   cumulative .. everything this device has saved on that line in that
+  ///                 bin, this save included. Used only to spot a resend.
+  ///   register .... false for the app's Update Pick / Partial Pick: the
+  ///                 scans are saved and the pick stays open; the app
+  ///                 registers it later through /pick/register. Missing or
+  ///                 true keeps the old one-call save-and-register.
   ///
-  /// RESEND PROTECTION. BC adds every scan to the line and never
-  /// de-duplicates, so a batch replayed after a lost response would
-  /// double-count. Before sending, a line whose entries all target the
-  /// line's CURRENT bin, and whose total equals what BC already has set to
-  /// handle on it, is treated as already held and not sent again. Every
-  /// other entry is sent as given, and BC stays the authority on whether
-  /// it is accepted ("exceeds line quantity" etc. come back verbatim).
+  /// RESEND PROTECTION. Business Central never de-duplicates a scan, so a
+  /// save replayed after a lost response would count twice. An entry is
+  /// treated as already held — and not sent — when a Take line with the
+  /// same item / variant / lot / serial is on the entry's bin and already
+  /// has exactly `cumulative` set to handle, and that line is either the
+  /// entry's own line or the line Business Central split off it (the
+  /// entry's own line is on another bin). On a line that was never
+  /// scanned, Business Central's own automatic Qty. to Handle can match
+  /// `cumulative` only when the whole line was picked from that bin —
+  /// and then not sending it leaves exactly what was picked to post.
+  /// Entries without `cumulative` (older app builds) keep the old
+  /// whole-line check.
   ///
   /// Register's outcome is REPORTED, never thrown: once the batch has
-  /// succeeded the scans are saved in BC, and throwing would make the
-  /// app's outbox resend them.
+  /// succeeded the scans are saved in Business Central, and throwing would
+  /// make the app's outbox resend them.
   async confirmPickBatch(payload) {
     const { bcPickId, entries } = payload || {};
+    const register = payload && payload.register === false ? false : true;
     if (!bcPickId) {
       throw ApiError.badRequest(
         'confirmPickBatch requires bcPickId — this pick was not read from Business Central, so there is no pick to confirm against.',
@@ -997,27 +1016,48 @@ class BusinessCentralDataSource {
     const scans = entries.map((e, i) => ({ entry: e, scan: this._buildPickScan(e, lines.get(e.bcLineId), i) }));
 
     const norm = (v) => String(v || '').trim().toUpperCase();
+    const takeLines = [...lines.values()].filter((l) => l.actionType === 'Take');
+    const held = new Set();
+
+    // Entries that carry `cumulative` — checked one by one.
+    scans.forEach((s, index) => {
+      const cumulative = s.entry.cumulative;
+      if (cumulative == null) return;
+      const own = lines.get(s.entry.bcLineId);
+      const key = this._pickTrackingKey(own);
+      const bin = norm(s.scan.binCode);
+      const match = takeLines.find(
+        (l) =>
+          this._pickTrackingKey(l) === key &&
+          norm(l.binCode) === bin &&
+          Number(l.qtyToHandle || 0) === Number(cumulative) &&
+          (l.id === own.id || norm(own.binCode) !== bin),
+      );
+      if (match) held.add(index);
+    });
+
+    // Older builds: the whole-line check, per line.
+    const legacy = scans.map((s, index) => ({ s, index })).filter(({ s }) => s.entry.cumulative == null);
     const byLine = new Map();
-    for (const s of scans) {
-      const group = byLine.get(s.entry.bcLineId) || [];
-      group.push(s);
-      byLine.set(s.entry.bcLineId, group);
+    for (const item of legacy) {
+      const group = byLine.get(item.s.entry.bcLineId) || [];
+      group.push(item);
+      byLine.set(item.s.entry.bcLineId, group);
     }
-    const heldLineIds = new Set();
     for (const [lineId, group] of byLine) {
       const line = lines.get(lineId);
       const lineBin = norm(line.binCode);
       const pending = Number(line.qtyToHandle || 0);
-      const total = group.reduce((sum, s) => sum + s.scan.qtyToHandle, 0);
-      const allOnLineBin = lineBin !== '' && group.every((s) => norm(s.scan.binCode) === lineBin);
-      if (allOnLineBin && pending > 0 && pending === total) heldLineIds.add(lineId);
+      const total = group.reduce((sum, g) => sum + g.s.scan.qtyToHandle, 0);
+      const allOnLineBin = lineBin !== '' && group.every((g) => norm(g.s.scan.binCode) === lineBin);
+      if (allOnLineBin && pending > 0 && pending === total) group.forEach((g) => held.add(g.index));
     }
 
-    const toSend = scans.filter((s) => !heldLineIds.has(s.entry.bcLineId));
-    if (heldLineIds.size > 0) {
+    const toSend = scans.filter((_, index) => !held.has(index));
+    if (held.size > 0) {
       logger.info(
-        { bcPickId, held: [...heldLineIds], sending: toSend.length },
-        'Pick batch: Business Central already holds these lines — not sending them again',
+        { bcPickId, held: [...held].map((i) => scans[i].entry.bcLineId), sending: toSend.length },
+        'Pick batch: Business Central already holds these entries — not sending them again',
       );
     }
     if (toSend.length > 0) {
@@ -1034,6 +1074,10 @@ class BusinessCentralDataSource {
       logger.info({ bcPickId }, 'Pick batch accepted by Business Central');
     }
 
+    if (!register) {
+      return { ok: true, held: held.size, registerAttempted: false, registered: false, registerError: null };
+    }
+
     let registerOutcome;
     try {
       logger.info({ bcPickId }, 'Pick → Business Central Register');
@@ -1045,24 +1089,116 @@ class BusinessCentralDataSource {
       registerOutcome = { registerAttempted: true, registered: false, registerError: error.message || String(error) };
     }
 
-    return { ok: true, held: heldLineIds.size, ...registerOutcome };
+    return { ok: true, held: held.size, ...registerOutcome };
   }
 
   /// Section 2.11 — POST picks(bcPickId)/Microsoft.NAV.Register, empty
-  /// body. For a manual Register (e.g. retrying after confirmPickBatch
-  /// reported registered: false). Partial registration is normal: BC posts
-  /// what is set to handle and leaves the rest outstanding on the pick.
+  /// body. Business Central posts whatever is on Qty. to Handle on every
+  /// Take line and leaves the rest outstanding — partial versus full is
+  /// only a matter of what was saved first.
+  ///
+  /// Payload: { docId, bcPickId, partial?, expected? }.
+  ///   expected .. [{ bcLineId, bin, qty }] — what the app saved and has not
+  ///               registered yet, per line and bin.
+  ///
+  /// SAFETY CHECK (when `expected` is sent). Business Central can hold Qty.
+  /// to Handle on a line nobody picked — its own automatic fill when the
+  /// pick was created. Register would post those units as picked. So,
+  /// before registering, what Business Central has set to handle is
+  /// compared with `expected` per item / variant / lot / serial and bin;
+  /// any difference refuses the Register (409) and names the lines, and
+  /// nothing is posted. Without `expected` (older builds) it registers as
+  /// before.
+  ///
+  /// Returns { ok, fullyRegistered } — fullyRegistered is true when the
+  /// pick has no Take line left outstanding afterwards (or is gone).
   async registerPick(payload) {
-    const { bcPickId } = payload || {};
+    const { bcPickId, expected } = payload || {};
     if (!bcPickId) {
       throw ApiError.badRequest(
         'registerPick requires bcPickId — this pick was not read from Business Central, so there is no pick to register.',
       );
     }
-    logger.info({ bcPickId }, 'Pick → Business Central Register (manual)');
+
+    if (Array.isArray(expected)) {
+      const lines = await this._fetchPickLinesById(bcPickId);
+      const norm = (v) => String(v || '').trim().toUpperCase();
+      const takeLines = [...lines.values()].filter((l) => l.actionType === 'Take');
+
+      // What Business Central holds, per tracking key + bin.
+      const bc = new Map();
+      const sample = new Map();
+      for (const l of takeLines) {
+        const q = Number(l.qtyToHandle || 0);
+        if (q <= 0) continue;
+        const k = `${this._pickTrackingKey(l)}@${norm(l.binCode)}`;
+        bc.set(k, (bc.get(k) || 0) + q);
+        if (!sample.has(k)) sample.set(k, l);
+      }
+      // What the app saved, on the same key.
+      const app = new Map();
+      for (const e of expected) {
+        const line = lines.get(e.bcLineId);
+        const key = line
+          ? this._pickTrackingKey(line)
+          : [norm(e.sku), norm(e.variantCode), norm(e.lotNo), norm(e.serialNo)].join('|');
+        const k = `${key}@${norm(e.bin)}`;
+        app.set(k, (app.get(k) || 0) + Number(e.qty || 0));
+        if (line && !sample.has(k)) sample.set(k, line);
+      }
+
+      const problems = [];
+      for (const k of new Set([...bc.keys(), ...app.keys()])) {
+        const has = bc.get(k) || 0;
+        const want = app.get(k) || 0;
+        if (has === want) continue;
+        const l = sample.get(k);
+        const what = l
+          ? [
+              `line ${l.lineNo}`,
+              l.itemNo,
+              norm(l.lotNo) ? `lot ${l.lotNo}` : null,
+              norm(l.serialNo) ? `serial ${l.serialNo}` : null,
+              norm(l.binCode) ? `bin ${l.binCode}` : 'no bin',
+            ]
+              .filter(Boolean)
+              .join(', ')
+          : k;
+        problems.push(
+          has > want
+            ? `${what}: Business Central has ${has} to handle, this device saved ${want}`
+            : `${what}: this device saved ${want}, Business Central has ${has}`,
+        );
+      }
+
+      if (problems.length > 0) {
+        logger.warn({ bcPickId, problems }, 'Pick register refused — Business Central quantities differ from what the app saved');
+        throw ApiError.conflict(
+          `Register stopped — nothing was posted. Qty. to Handle in Business Central does not match what was picked: ${problems.join('; ')}. ` +
+            'If Business Central filled Qty. to Handle by itself, run "Delete Qty. to Handle" on the pick in Business Central, then save again and register.',
+          'PICK_QTY_MISMATCH',
+        );
+      }
+    }
+
+    logger.info({ bcPickId }, 'Pick → Business Central Register');
     await this._bcPost(`picks(${bcPickId})/Microsoft.NAV.Register`, {});
-    logger.info({ bcPickId }, 'Pick registered (manual)');
-    return { ok: true };
+    logger.info({ bcPickId }, 'Pick registered');
+
+    let fullyRegistered = false;
+    try {
+      const after = await this._fetchPickLinesById(bcPickId);
+      fullyRegistered = ![...after.values()].some(
+        (l) =>
+          l.actionType === 'Take' &&
+          (typeof l.qtyOutstanding === 'number' ? l.qtyOutstanding : Number(l.quantity || 0)) > 0,
+      );
+    } catch (error) {
+      // Business Central removes a fully registered pick — the follow-up
+      // read then fails. The Register itself succeeded.
+      fullyRegistered = true;
+    }
+    return { ok: true, fullyRegistered };
   }
 
   /// Live check for the bin an operator scanned to TAKE a pick line from.

@@ -333,6 +333,10 @@ class DemoDataSource {
       doc._confirmed.add(entry.sku);
     }
     doc.status = doc._confirmed.size >= new Set(doc.items.map((i) => i.sku)).size ? 'complete' : 'inProgress';
+    // register: false (the app's Update Pick / Partial Pick) only saves.
+    if (payload.register === false) {
+      return { ok: true, registerAttempted: false, registered: false, registerError: null };
+    }
     return { ok: true, registerAttempted: true, registered: true, registerError: null };
   }
 
@@ -348,7 +352,8 @@ class DemoDataSource {
   async registerPick(payload) {
     const { docId } = payload || {};
     if (!docId) throw ApiError.badRequest('docId is required.');
-    return { ok: true };
+    // Demo data has nothing outstanding to keep open.
+    return { ok: true, fullyRegistered: true };
   }
 
   // ------------------------------------------------------------------

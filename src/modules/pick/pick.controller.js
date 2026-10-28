@@ -58,14 +58,22 @@ async function confirmItem(req, res) {
   res.status(201).json(result);
 }
 
-/// POST /pick/confirm-batch — the whole pick's scans in one call, then
-/// Register (Business Central Sections 2.10 + 2.11). All-or-nothing on
-/// Business Central's side. The response always reports Register's
-/// outcome (registerAttempted / registered / registerError) rather than
-/// failing the request over it, because the scans are already saved once
-/// the batch succeeds — resending them would double-count.
+/// POST /pick/confirm-batch — one save of picked units (Business Central
+/// Section 2.10), all-or-nothing on Business Central's side.
+///
+/// `register: false` (the app's Update Pick and Partial Pick) saves and
+/// leaves the pick open; it is registered later through /pick/register.
+/// Without it (older builds) Register follows straight away (2.11). The
+/// response always reports Register's outcome (registerAttempted /
+/// registered / registerError) rather than failing the request over it,
+/// because the scans are already saved once the batch succeeds —
+/// resending them would double-count.
+///
+/// Each entry may carry `cumulative` (everything saved on that line in
+/// that bin, this save included) — used to recognise a resend; see
+/// businessCentralDataSource.js's confirmPickBatch.
 async function confirmBatch(req, res) {
-  const { docId, bcPickId, entries } = req.body || {};
+  const { docId, bcPickId, entries, register } = req.body || {};
   if (!docId || !Array.isArray(entries) || entries.length === 0) {
     throw ApiError.badRequest('docId and a non-empty entries array are required.');
   }
@@ -74,7 +82,7 @@ async function confirmBatch(req, res) {
       throw ApiError.badRequest(`entries[${i}]: sku, location, and qty are all required.`);
     }
   }
-  const result = await dataSource.confirmPickBatch({ docId, bcPickId, entries });
+  const result = await dataSource.confirmPickBatch({ docId, bcPickId, entries, register: register !== false });
   res.status(201).json(result);
 }
 
@@ -91,15 +99,24 @@ async function checkBin(req, res) {
   res.status(200).json(result);
 }
 
-/// POST /pick/register — manual Register (Section 2.11), e.g. to retry
-/// after confirm-batch reported registered: false. Partial registration is
-/// allowed: unscanned quantity stays outstanding on the same pick.
+/// POST /pick/register — Register (Section 2.11). Partial registration is
+/// allowed: what is not saved stays outstanding on the same pick.
+///
+/// `expected` ([{ bcLineId, bin, qty, sku?, variantCode?, lotNo?,
+/// serialNo? }]) is what the app saved and has not registered yet. When
+/// sent, Register is refused (409, nothing posted) if Business Central's
+/// Qty. to Handle differs from it — e.g. Business Central's own automatic
+/// fill on lines nobody picked. `partial` is informational (logged).
+/// Responds { ok, fullyRegistered }.
 async function register(req, res) {
-  const { docId, bcPickId } = req.body || {};
+  const { docId, bcPickId, partial, expected } = req.body || {};
   if (!docId) {
     throw ApiError.badRequest('docId is required.');
   }
-  const result = await dataSource.registerPick({ docId, bcPickId });
+  if (expected != null && !Array.isArray(expected)) {
+    throw ApiError.badRequest('expected must be an array when sent.');
+  }
+  const result = await dataSource.registerPick({ docId, bcPickId, partial: partial === true, expected });
   res.status(200).json(result);
 }
 
