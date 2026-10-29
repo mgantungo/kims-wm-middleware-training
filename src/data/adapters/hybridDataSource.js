@@ -212,6 +212,8 @@ class HybridDataSource {
   async validateTransferSplitBin(...args) { return this._demo.validateTransferSplitBin(...args); }
   async suggestTransferSplitBin(...args) { return this._demo.suggestTransferSplitBin(...args); }
   async confirmTransferItem(...args) { return this._demo.confirmTransferItem(...args); }
+  async saveTransfer(...args) { return this._demo.saveTransfer(...args); }
+  async registerTransfer(...args) { return this._demo.registerTransfer(...args); }
 
   async getQuarantineDocuments(...args) { return this._demo.getQuarantineDocuments(...args); }
   async getQuarantineDocument(...args) { return this._demo.getQuarantineDocument(...args); }

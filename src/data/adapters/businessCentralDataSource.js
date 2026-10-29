@@ -1720,6 +1720,8 @@ class BusinessCentralDataSource {
   async validateTransferSplitBin() { return this._notImplemented('validateTransferSplitBin'); }
   async suggestTransferSplitBin() { return this._notImplemented('suggestTransferSplitBin'); }
   async confirmTransferItem() { return this._notImplemented('confirmTransferItem'); }
+  async saveTransfer() { return this._notImplemented('saveTransfer'); }
+  async registerTransfer() { return this._notImplemented('registerTransfer'); }
 
   // Quarantine — document-driven, same BC movement mechanism as Item
   // Transfer, plus whatever field BC uses to record a quarantine reason

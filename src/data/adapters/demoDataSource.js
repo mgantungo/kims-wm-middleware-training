@@ -553,13 +553,143 @@ class DemoDataSource {
   // above) with sourceBinCode added per line.
   // ------------------------------------------------------------------
   async getTransferDocuments() {
-    return { documents: Object.values(this._transferDocs).map(stripInternal) };
+    return { documents: Object.values(this._transferDocs).map((d) => this._transferView(d)) };
   }
 
   async getTransferDocument(docId) {
     const doc = this._transferDocs[docId];
+    if (!doc) throw ApiError.notFound(`Transfer document "${docId}" not found — nothing left to transfer.`);
+    return this._transferView(doc);
+  }
+
+  /// A transfer as the app sees it. Every line carries its own id, its
+  /// tracking (lot / serial), qty = what is still outstanding (registered
+  /// units are gone), qtyHandled = registered so far, and qtyToHandle =
+  /// saved and not registered yet (Update / Partial Transfer).
+  _transferView(doc) {
+    const saved = doc._saved || {};
+    const savedOn = (lineId) => Object.values(saved[lineId] || {}).reduce((a, q) => a + q, 0);
+    const items = doc.items.map((l) => ({ ...l, qtyToHandle: savedOn(l.lineId) }));
+    const anyActivity = items.some((l) => l.qtyToHandle > 0 || (l.qtyHandled || 0) > 0);
+    return { ...stripInternal(doc), status: anyActivity ? 'inProgress' : 'assigned', items };
+  }
+
+  /// UPDATE / PARTIAL TRANSFER — saves taken-and-placed units without
+  /// registering (Business Central keeps them as Qty. to Handle). Payload:
+  ///   { docId, register?: false, entries: [{ lineId, sku, fromBin, toBin,
+  ///     qty, lotNo?, serialNo?, cumulative? }] }
+  /// All-or-nothing, like Business Central's batch scan: every entry is
+  /// checked before any is applied. [cumulative] is what the device has
+  /// saved on that line and TO bin including this entry — an entry whose
+  /// cumulative is already held is skipped, so a retry after a lost
+  /// response never double-counts.
+  async saveTransfer(payload) {
+    const { docId, entries } = payload || {};
+    const doc = this._transferDocs[docId];
     if (!doc) throw ApiError.notFound(`Transfer document "${docId}" not found.`);
-    return stripInternal(doc);
+    if (!Array.isArray(entries) || entries.length === 0) throw ApiError.badRequest('entries must be a non-empty array.');
+
+    doc._saved = doc._saved || {};
+    doc._held = doc._held || {};
+    const planned = {};
+    const apply = [];
+    const problems = [];
+    entries.forEach((e, i) => {
+      const n = i + 1;
+      const line = doc.items.find((l) => l.lineId === e.lineId);
+      const qty = Number(e.qty);
+      const toBin = String(e.toBin || '').trim().toUpperCase();
+      if (!line) return problems.push(`Entry ${n}: line ${e.lineId} is not on ${docId}`);
+      if (!(qty > 0)) return problems.push(`Entry ${n}: quantity must be greater than zero`);
+      if (!toBin || !this._binRegistry[toBin]) return problems.push(`Entry ${n}: bin "${e.toBin}" does not exist`);
+      if (String(e.fromBin || '').trim().toUpperCase() !== line.sourceBinCode.toUpperCase()) {
+        return problems.push(`Entry ${n}: ${line.sku} is taken from ${line.sourceBinCode}, not ${e.fromBin}`);
+      }
+      if (line.isLotTracked && (e.lotNo || '') !== line.lotNo) return problems.push(`Entry ${n}: lot "${e.lotNo || ''}" does not match ${line.lotNo}`);
+      if (line.isSerialTracked && (e.serialNo || '') !== line.serialNo) {
+        return problems.push(`Entry ${n}: serial "${e.serialNo || ''}" does not match ${line.serialNo}`);
+      }
+      const heldKey = `${line.lineId}|${toBin}`;
+      if (e.cumulative != null && (doc._held[heldKey] || 0) >= Number(e.cumulative)) return; // already applied
+      const lineTotal = Object.values(doc._saved[line.lineId] || {}).reduce((a, q) => a + q, 0) + (planned[line.lineId] || 0) + qty;
+      if (lineTotal > line.qty) return problems.push(`Entry ${n}: ${lineTotal} saved would exceed the ${line.qty} outstanding on ${line.sku}`);
+      planned[line.lineId] = (planned[line.lineId] || 0) + qty;
+      apply.push({ line, toBin, qty, heldKey });
+    });
+    if (problems.length) {
+      throw ApiError.badRequest(`Processed ${entries.length - problems.length} entr${entries.length - problems.length === 1 ? 'y' : 'ies'}, skipped ${problems.length}: ${problems.join('; ')}. Nothing was saved.`);
+    }
+    for (const a of apply) {
+      const byBin = (doc._saved[a.line.lineId] = doc._saved[a.line.lineId] || {});
+      byBin[a.toBin] = (byBin[a.toBin] || 0) + a.qty;
+      doc._held[a.heldKey] = (doc._held[a.heldKey] || 0) + a.qty;
+    }
+    return { ok: true, saved: apply.length, skipped: entries.length - apply.length, registerAttempted: false, registered: false, registerError: null };
+  }
+
+  /// REGISTER TRANSFER / PARTIAL REGISTER — posts what is saved. [expected]
+  /// is what the device saved and has not registered: [{ lineId, toBin,
+  /// qty }]. When the saved quantities here differ, nothing is posted
+  /// (409 TRANSFER_QTY_MISMATCH) — the same safety check as Register Pick.
+  /// Posted units leave the FROM bin, arrive in the TO bin, and come off
+  /// the line; a line with nothing outstanding is removed, and a transfer
+  /// with no lines left is gone (fullyRegistered: true).
+  async registerTransfer(payload) {
+    const { docId, expected } = payload || {};
+    const doc = this._transferDocs[docId];
+    if (!doc) throw ApiError.notFound(`Transfer document "${docId}" not found.`);
+    const saved = doc._saved || {};
+    const flat = {};
+    for (const [lineId, byBin] of Object.entries(saved)) {
+      for (const [bin, q] of Object.entries(byBin)) if (q > 0) flat[`${lineId}|${bin}`] = q;
+    }
+    if (Object.keys(flat).length === 0) throw ApiError.badRequest(`Nothing is saved on ${docId} to register.`);
+
+    if (Array.isArray(expected)) {
+      const want = {};
+      for (const e of expected) {
+        const k = `${e.lineId}|${String(e.toBin || '').trim().toUpperCase()}`;
+        want[k] = (want[k] || 0) + Number(e.qty || 0);
+      }
+      const problems = [];
+      for (const k of new Set([...Object.keys(want), ...Object.keys(flat)])) {
+        if ((want[k] || 0) !== (flat[k] || 0)) {
+          const [lineId, bin] = k.split('|');
+          const line = doc.items.find((l) => l.lineId === lineId);
+          problems.push(`${line ? line.sku : lineId} to ${bin}: device ${want[k] || 0}, server ${flat[k] || 0}`);
+        }
+      }
+      if (problems.length) {
+        throw ApiError.conflict(`Register stopped — nothing was posted. Saved quantities do not match: ${problems.join('; ')}.`, 'TRANSFER_QTY_MISMATCH');
+      }
+    }
+
+    let posted = 0;
+    for (const line of doc.items) {
+      const byBin = saved[line.lineId] || {};
+      for (const [bin, q] of Object.entries(byBin)) {
+        if (!(q > 0)) continue;
+        line.qty -= q;
+        line.qtyHandled = (line.qtyHandled || 0) + q;
+        posted += q;
+        const from = this._binRegistry[line.sourceBinCode.toUpperCase()];
+        if (from && from.occupantSku === line.sku) {
+          from.currentQty = Math.max(0, from.currentQty - q);
+          if (from.currentQty === 0) from.occupantSku = null;
+        }
+        const to = this._binRegistry[bin];
+        if (to) {
+          to.currentQty += q;
+          if (!to.occupantSku) to.occupantSku = line.sku;
+        }
+      }
+    }
+    doc._saved = {};
+    doc._held = {};
+    doc.items = doc.items.filter((l) => l.qty > 0);
+    const fullyRegistered = doc.items.length === 0;
+    if (fullyRegistered) delete this._transferDocs[docId];
+    return { ok: true, registered: true, postedQty: posted, fullyRegistered };
   }
 
   /// Records one confirmed line movement. Still updates the shared bin
@@ -752,7 +882,7 @@ class DemoDataSource {
 }
 
 function stripInternal(doc) {
-  const { _confirmed, _confirmedQty, _scanLogs, ...rest } = doc;
+  const { _confirmed, _confirmedQty, _scanLogs, _saved, _held, ...rest } = doc;
   return rest;
 }
 
@@ -894,40 +1024,69 @@ function seedVerifyPicks() {
 }
 
 function seedTransferDocs() {
+  // Every line has its own id (a Business Central movement line would carry
+  // its SystemId), its tracking and qty = outstanding. Take from
+  // sourceBinCode, place into destinationBinCode.
+  const line = (lineId, sku, description, qty, sourceBinCode, destinationBinCode, extra = {}) => ({
+    lineId,
+    sku,
+    description,
+    qty,
+    qtyHandled: 0,
+    uom: 'PCS',
+    sourceBinCode,
+    destinationBinCode,
+    lotNo: '',
+    serialNo: '',
+    isLotTracked: false,
+    isSerialTracked: false,
+    scannable: true,
+    ...extra,
+  });
   return {
     'TR-00301': {
       docId: 'TR-00301',
       status: 'assigned',
-      // Many-to-one: two small bins of the SAME sku consolidating into
-      // one bigger, currently-empty bin — both lines share
-      // destinationBinCode. Matches "multiple small bins to one big bin"
-      // from the product brief.
+      // Many-to-one: two small bins of the same item consolidating into one.
       items: [
-        { sku: 'SKU-BOLT-M6', description: 'Hex Bolt, M6 x 20mm', qty: 18, sourceBinCode: 'A-05-01', destinationBinCode: 'C-02-01' },
-        { sku: 'SKU-BOLT-M6', description: 'Hex Bolt, M6 x 20mm', qty: 6, sourceBinCode: 'A-05-02', destinationBinCode: 'C-02-01' },
+        line('TR301-10000', 'SKU-BOLT-M6', 'Hex Bolt, M6 x 20mm', 18, 'A-05-01', 'C-02-01'),
+        line('TR301-20000', 'SKU-BOLT-M6', 'Hex Bolt, M6 x 20mm', 6, 'A-05-02', 'C-02-01'),
       ],
     },
     'TR-00302': {
       docId: 'TR-00302',
       status: 'assigned',
-      // One-to-many split: one source bin, one sku, split across two
-      // different (empty) destinations with different quantities —
-      // together consuming all 24 units B-01-01 holds.
+      // One-to-many: one source bin split across two TO bins.
       items: [
-        { sku: 'SKU-NAIL-2IN', description: 'Finish Nail, 2 inch', qty: 15, sourceBinCode: 'B-01-01', destinationBinCode: 'RCV-C2' },
-        { sku: 'SKU-NAIL-2IN', description: 'Finish Nail, 2 inch', qty: 9, sourceBinCode: 'B-01-01', destinationBinCode: 'REPAIR-STAGING' },
+        line('TR302-10000', 'SKU-NAIL-2IN', 'Finish Nail, 2 inch', 15, 'B-01-01', 'RCV-C2'),
+        line('TR302-20000', 'SKU-NAIL-2IN', 'Finish Nail, 2 inch', 9, 'B-01-01', 'REPAIR-STAGING'),
       ],
     },
     'TR-00303': {
       docId: 'TR-00303',
       status: 'assigned',
-      // Straightforward one-to-one, repair-driven move. Note: this demo
-      // adapter doesn't enforce single-sku-per-destination bookkeeping
-      // across Transfer documents the way it does for Put Away/Quarantine
-      // suggestions — REPAIR-STAGING can legitimately receive several
-      // different skus from several different transfers, which is a
-      // real staging-area pattern, not a bug worth guarding against here.
-      items: [{ sku: 'SKU-CLIP-RET', description: 'Retaining Clip', qty: 9, sourceBinCode: 'B-03-04', destinationBinCode: 'REPAIR-STAGING' }],
+      items: [line('TR303-10000', 'SKU-CLIP-RET', 'Retaining Clip', 9, 'B-03-04', 'REPAIR-STAGING')],
+    },
+    'TR-00304': {
+      docId: 'TR-00304',
+      status: 'assigned',
+      // Lot-tracked (scan the lot number, or the item after the lot) and
+      // serial-tracked lines (scan each serial number).
+      items: [
+        line('TR304-10000', 'ITM_KL_0102', 'Sodium Chloride Infusion BP 0.9% W/V 500ML', 12, 'RCV-B2', 'RCV-A2', { lotNo: 'PFL25226', isLotTracked: true, uom: 'BTL' }),
+        line('TR304-20000', 'ITM_KL_0148', 'Service Connection Wooden LV Poles 10 Meters', 1, 'RCV-B1', 'C-02-01', {
+          lotNo: 'BC63/FEB-26',
+          serialNo: 'NP02815',
+          isLotTracked: true,
+          isSerialTracked: true,
+        }),
+        line('TR304-30000', 'ITM_KL_0148', 'Service Connection Wooden LV Poles 10 Meters', 1, 'RCV-B1', 'C-02-01', {
+          lotNo: 'BC63/FEB-26',
+          serialNo: 'NP02817',
+          isLotTracked: true,
+          isSerialTracked: true,
+        }),
+      ],
     },
   };
 }

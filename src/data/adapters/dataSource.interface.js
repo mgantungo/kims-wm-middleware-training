@@ -42,6 +42,24 @@
  *   Central picks the bin itself (the "Auto-Assign" path) rather than
  *   judging one the operator scanned — identical semantics to
  *   suggestPutAwayBin, including the isTopUp/currentQty fields.
+ * saveTransfer(payload)                 -> { ok, saved, skipped, registerAttempted: false }
+ *   payload: { docId, bcTransferId?, entries: [{ lineId, sku, fromBin,
+ *   toBin, qty, lotNo?, serialNo?, cumulative? }] }
+ *   UPDATE / PARTIAL TRANSFER. Saves taken-and-placed units as Qty. to
+ *   Handle without registering. All-or-nothing; an entry whose cumulative
+ *   (device total on that line and TO bin) is already held is skipped, so
+ *   an outbox resend never double-counts. A TO bin other than the line's
+ *   destinationBinCode is a split (Stop & Split).
+ * registerTransfer(payload)             -> { ok, registered, postedQty, fullyRegistered }
+ *   payload: { docId, bcTransferId?, partial?, expected?: [{ lineId,
+ *   toBin, qty }] }
+ *   REGISTER TRANSFER / PARTIAL REGISTER. Posts what is saved; refuses
+ *   with 409 TRANSFER_QTY_MISMATCH (nothing posted) when the saved
+ *   quantities differ from [expected]. Lines keep their unsaved remainder
+ *   (qty = outstanding) for a later run.
+ *   TransferLineItem (from getTransferDocument) now also carries: lineId,
+ *   lotNo, serialNo, isLotTracked, isSerialTracked, qtyHandled,
+ *   qtyToHandle, uom — qty is what is still outstanding.
  * confirmTransferItem(payload)          -> { ok: true }
  *   payload: { docId, sku, sourceBinCode, destinationBinCode, qty,
  *   scanLog? }

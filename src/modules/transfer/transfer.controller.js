@@ -48,4 +48,29 @@ async function confirmItem(req, res) {
   res.status(201).json(result);
 }
 
-module.exports = { listDocuments, getDocument, validateBin, suggestBin, confirmItem };
+/// UPDATE / PARTIAL TRANSFER — saves without registering. Replayed from
+/// the app's outbox, so it must be safe to resend: every entry carries
+/// `cumulative` (see dataSource.saveTransfer).
+async function saveBatch(req, res) {
+  const { docId, bcTransferId, entries, register } = req.body || {};
+  if (!docId || !Array.isArray(entries) || entries.length === 0) {
+    throw ApiError.badRequest('docId and a non-empty entries array are required.');
+  }
+  if (register === true) {
+    throw ApiError.badRequest('A save never registers — call POST /transfer/register after it.');
+  }
+  const result = await dataSource.saveTransfer({ docId, bcTransferId, entries });
+  res.status(200).json(result);
+}
+
+/// REGISTER TRANSFER / PARTIAL REGISTER — live, never queued. `expected`
+/// is what the device saved and has not registered; a mismatch posts
+/// nothing (409).
+async function register(req, res) {
+  const { docId, bcTransferId, partial, expected } = req.body || {};
+  if (!docId) throw ApiError.badRequest('docId is required.');
+  const result = await dataSource.registerTransfer({ docId, bcTransferId, partial: partial === true, expected });
+  res.status(200).json(result);
+}
+
+module.exports = { listDocuments, getDocument, validateBin, suggestBin, confirmItem, saveBatch, register };
