@@ -1228,13 +1228,19 @@ class BusinessCentralDataSource {
     if (locationCode) filter += ` and locationCode eq '${esc(locationCode)}'`;
     const data = await this._bcGet(`Bins?$filter=${filter}&$expand=binContentLines($expand=palletAndLots)`);
     const bin = (data.value || [])[0];
+    const asked = { binCode, sku, lotNo: lotNo || null, serialNo: serialNo || null, locationCode: locationCode || null };
     if (!bin) {
+      logger.warn({ ...asked, binsFound: (data.value || []).length }, 'Pick bin check: bin not found');
       return { available: false, reason: `Bin "${binCode}" is not recognized at this location.` };
     }
 
     const norm = (v) => String(v || '').trim().toUpperCase();
     const lines = (bin.binContentLines || []).filter((l) => norm(l.itemNo) === norm(sku));
     if (lines.length === 0) {
+      logger.warn(
+        { ...asked, binLocation: bin.locationCode, itemsInBin: (bin.binContentLines || []).map((l) => l.itemNo) },
+        'Pick bin check: item not in bin contents',
+      );
       return { available: false, reason: `Bin ${bin.binCode} holds no ${sku}.` };
     }
 
@@ -1253,6 +1259,17 @@ class BusinessCentralDataSource {
     }
 
     if (qty <= 0) {
+      logger.warn(
+        {
+          ...asked,
+          binLocation: bin.locationCode,
+          lines: lines.map((l) => ({
+            quantity: l.quantity,
+            lots: (l.palletAndLots || []).map((x) => ({ lotNo: x.lotNo, serialNo: x.serialNo, quantity: x.quantity })),
+          })),
+        },
+        'Pick bin check: no stock of this lot / serial in the bin',
+      );
       const what = [sku, lotNo ? `lot ${lotNo}` : null, serialNo ? `serial ${serialNo}` : null].filter(Boolean).join(' ');
       return { available: false, reason: `Bin ${bin.binCode} holds no stock of ${what}.` };
     }
