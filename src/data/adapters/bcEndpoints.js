@@ -2,11 +2,12 @@
 const logger = require('../../utils/logger');
 
 /**
- * Business Central can be reached on more than one address (e.g. two
- * public IPs in front of the same server). BC_BASE_URL takes them all,
- * comma separated, in order of preference:
+ * Business Central is reached on one address for every endpoint:
  *
- *   BC_BASE_URL=http://197.221.147.130:7048/KLL/api/KLL/WH/v2.0,http://102.216.144.5:7048/KLL/api/KLL/WH/v2.0
+ *   BC_BASE_URL=http://erp.klanlogistics.com:7048/KLL/api/kll/wh/v2.0
+ *
+ * (BC_BASE_URL could list several addresses, comma separated; with one
+ * address everything below simply always uses it.)
  *
  * Every Business Central call goes through [BcEndpoints.fetch], which uses
  * the address that last worked and moves to the next one when it can't be
