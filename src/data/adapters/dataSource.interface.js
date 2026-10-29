@@ -292,7 +292,19 @@
  *   Business-Central-only (demo's _binRegistry has no such metadata).
  *   Never guess a value for a field the current source can't actually
  *   provide — omit it, same convention as searchBin.
- * trackPallet(palletId)                 -> PalletTrackingResult
+ * trackPallet(palletId)                 -> { palletNo, binCode, zoneCode,
+ *                                            locationCode, status, lastMovedAt,
+ *                                            contents: [{ itemNo, description,
+ *                                            lotNo, serialNo, qty, uom }],
+ *                                            history: [{ at, fromBinCode,
+ *                                            toBinCode, by }] }
+ *   A pallet sits in ONE bin and its contents move together. 404 when the
+ *   pallet is not known. (Legacy palletId / lastLocation / lastTimestamp
+ *   and name / sku / batch / units are also returned for older builds.)
+ * movePallet({ palletNo, toBinCode, by })-> { ok, fromBinCode, pallet }
+ *   Moves the whole pallet to another bin. Live, never queued. 400 with a
+ *   readable reason when the bin is unknown, doesn't take pallets or is
+ *   full. Demo only for now — no Business Central endpoint is documented.
  *
  * -- Quarantine (document-driven, per Klan's control requirement: same
  * pattern as Item Transfer above — the plan comes from Business Central,

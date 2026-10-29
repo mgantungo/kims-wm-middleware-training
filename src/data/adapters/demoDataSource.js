@@ -20,6 +20,19 @@ class DemoDataSource {
     this._verifyPicks = seedVerifyPicks();
     this._transferDocs = seedTransferDocs();
     this._quarantineDocs = seedQuarantineDocs();
+    this._pallets = seedPallets();
+    // Bins a pallet can be moved into (demo). maxPallets 1 = one pallet per bin.
+    this._palletBins = {
+      'A-01-01': { zoneCode: 'S-ZONE-A', takesPallets: true, maxPallets: 1 },
+      'A-01-02': { zoneCode: 'S-ZONE-A', takesPallets: true, maxPallets: 1 },
+      'A-02-01': { zoneCode: 'S-ZONE-A', takesPallets: true, maxPallets: 1 },
+      'B-01-01': { zoneCode: 'S-ZONE-B', takesPallets: true, maxPallets: 1 },
+      'B-02-03': { zoneCode: 'S-ZONE-B', takesPallets: true, maxPallets: 1 },
+      'DISPATCH-1-': { zoneCode: 'DISP-ZONE', takesPallets: true, maxPallets: 20 },
+      'RECEIVING-1-': { zoneCode: 'REC-ZONE', takesPallets: true, maxPallets: 20 },
+      'QZ-HOLD': { zoneCode: 'Q-ZONE', takesPallets: true, maxPallets: 5 },
+      'SHELF-C-01': { zoneCode: 'S-ZONE-C', takesPallets: false, maxPallets: 0 },
+    };
     this._gatePassSeq = 800;
 
     // Split-bin validation (put-away short/split flow, operator-scanned
@@ -463,16 +476,71 @@ class DemoDataSource {
     };
   }
 
+  /// A pallet sits in ONE bin and its contents move together. Lookup by
+  /// pallet number (case and spaces ignored). Returns the pallet with its
+  /// bin, contents and movement history — see dataSource.interface.js.
+  /// The legacy fields (palletId, lastLocation, lastTimestamp and
+  /// name/sku/batch/units on each content line) are kept so older app
+  /// builds still show something.
   async trackPallet(palletId) {
+    const pallet = this._findPallet(palletId);
+    if (!pallet) throw ApiError.notFound(`Pallet "${palletId}" was not found.`);
+    return this._palletView(pallet);
+  }
+
+  /// Moves a whole pallet — every item on it — to another bin. Live, never
+  /// queued. Payload: { palletNo, toBinCode }.
+  async movePallet(payload) {
+    const { palletNo, toBinCode } = payload || {};
+    if (!palletNo || !toBinCode) throw ApiError.badRequest('palletNo and toBinCode are required.');
+    const pallet = this._findPallet(palletNo);
+    if (!pallet) throw ApiError.notFound(`Pallet "${palletNo}" was not found.`);
+    const to = String(toBinCode).trim().toUpperCase();
+    if (to === pallet.binCode.toUpperCase()) {
+      throw ApiError.badRequest(`Pallet ${pallet.palletNo} is already in bin ${pallet.binCode}.`);
+    }
+    const bin = this._palletBins[to];
+    if (!bin) throw ApiError.badRequest(`Bin "${to}" is not recognized at ${pallet.locationCode}.`);
+    if (!bin.takesPallets) throw ApiError.badRequest(`Bin ${to} does not take pallets.`);
+    const occupant = Object.values(this._pallets).find((p) => p.binCode.toUpperCase() === to);
+    if (occupant && bin.maxPallets <= 1) {
+      throw ApiError.badRequest(`Bin ${to} already holds pallet ${occupant.palletNo}.`);
+    }
+    const from = pallet.binCode;
+    pallet.history.unshift({ at: new Date().toISOString(), fromBinCode: from, toBinCode: to, by: payload.by || null });
+    pallet.binCode = to;
+    pallet.zoneCode = bin.zoneCode;
+    pallet.lastMovedAt = new Date().toISOString();
+    return { ok: true, fromBinCode: from, pallet: this._palletView(pallet) };
+  }
+
+  _findPallet(id) {
+    const key = String(id || '').trim().toUpperCase();
+    return Object.values(this._pallets).find((p) => p.palletNo.toUpperCase() === key) || null;
+  }
+
+  _palletView(p) {
+    const contents = p.contents.map((c) => ({
+      ...c,
+      // legacy shape
+      name: c.description,
+      sku: c.itemNo,
+      batch: c.lotNo || '',
+      units: c.qty,
+    }));
     return {
-      palletId: palletId || 'PLT-98765',
-      status: 'In transit',
-      lastLocation: 'Dock 4B · Zone C',
-      lastTimestamp: new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }),
-      contents: [
-        { name: 'Industrial Bearing 50mm', sku: 'IND-BRG-050', batch: 'BT-X9', units: 20 },
-        { name: 'Lubricant Spray 400ml', sku: 'LUB-SPR-400', batch: 'BT-X12', units: 50 },
-      ],
+      palletNo: p.palletNo,
+      binCode: p.binCode,
+      zoneCode: p.zoneCode,
+      locationCode: p.locationCode,
+      status: p.status,
+      lastMovedAt: p.lastMovedAt,
+      contents,
+      history: p.history,
+      // legacy shape
+      palletId: p.palletNo,
+      lastLocation: `${p.binCode}${p.zoneCode ? ` · Zone ${p.zoneCode}` : ''}`,
+      lastTimestamp: p.lastMovedAt,
     };
   }
 
@@ -873,15 +941,72 @@ function seedQuarantineDocs() {
       // operator) — matches the same control requirement driving
       // Transfer's redesign.
       items: [
-        { sku: 'SKU-BOLT-M6', description: 'Hex Bolt, M6 x 20mm', qty: 4, sourceBinCode: 'A-05-01', destinationBinCode: 'QZ-DAMAGED', reasonCode: 'damaged', reasonNote: null },
+        { sku: 'SKU-BOLT-M6', description: 'Hex Bolt, M6 x 20mm', qty: 4, sourceBinCode: 'A-05-01', destinationBinCode: 'QZ-DAMAGED', reasonCode: 'damaged', reasonNote: 'Crushed carton on receipt' },
+        { sku: 'SKU-BOLT-M6', description: 'Hex Bolt, M6 x 20mm', qty: 2, sourceBinCode: 'A-05-02', destinationBinCode: 'QZ-DAMAGED', reasonCode: 'damaged', reasonNote: null },
       ],
     },
     'QT-00502': {
       docId: 'QT-00502',
       status: 'assigned',
       items: [
-        { sku: 'SKU-CLIP-RET', description: 'Retaining Clip', qty: 9, sourceBinCode: 'B-03-04', destinationBinCode: 'QZ-HOLD', reasonCode: 'qualityHold', reasonNote: null },
+        { sku: 'SKU-CLIP-RET', description: 'Retaining Clip', qty: 9, sourceBinCode: 'B-03-04', destinationBinCode: 'QZ-HOLD', reasonCode: 'qualityHold', reasonNote: 'Supplier recall check' },
       ],
+    },
+    'QT-00503': {
+      docId: 'QT-00503',
+      status: 'assigned',
+      items: [
+        { sku: 'SKU-NAIL-2IN', description: 'Wire Nail, 2 inch', qty: 12, sourceBinCode: 'B-01-01', destinationBinCode: 'QZ-HOLD', reasonCode: 'qualityHold', reasonNote: null },
+      ],
+    },
+  };
+}
+
+function seedPallets() {
+  const hour = 60 * 60 * 1000;
+  const at = (h) => new Date(Date.now() - h * hour).toISOString();
+  return {
+    'PLT-0001': {
+      palletNo: 'PLT-0001',
+      binCode: 'A-01-01',
+      zoneCode: 'S-ZONE-A',
+      locationCode: '3PL-WH-BKL',
+      status: 'In bin',
+      lastMovedAt: at(5),
+      contents: [
+        { itemNo: 'ITM_KL_0112', description: 'Sodium Chloride Infusion BP 0.9% W/V 500ML', lotNo: 'PFL25180', serialNo: '', qty: 480, uom: 'BTL' },
+        { itemNo: 'ITM_KL_0113', description: 'Glucose Intravenous Infusion BP5% W/V 500ML', lotNo: 'PL00001', serialNo: '', qty: 240, uom: 'BTL' },
+      ],
+      history: [
+        { at: at(5), fromBinCode: 'RECEIVING-1-', toBinCode: 'A-01-01', by: 'JKUSIIMA' },
+      ],
+    },
+    'PLT-0002': {
+      palletNo: 'PLT-0002',
+      binCode: 'B-02-03',
+      zoneCode: 'S-ZONE-B',
+      locationCode: '3PL-WH-BKL',
+      status: 'In bin',
+      lastMovedAt: at(26),
+      contents: [
+        { itemNo: 'ITM_KL_0150', description: 'Power Transformer 5MVA 132/33kV', lotNo: '', serialNo: '376909881', qty: 1, uom: 'PCS' },
+        { itemNo: 'ITM_KL_0150', description: 'Power Transformer 5MVA 132/33kV', lotNo: '', serialNo: '376909888', qty: 1, uom: 'PCS' },
+      ],
+      history: [
+        { at: at(26), fromBinCode: 'RECEIVING-1-', toBinCode: 'B-02-03', by: 'IAMPAIRE' },
+      ],
+    },
+    'PLT-0003': {
+      palletNo: 'PLT-0003',
+      binCode: 'RECEIVING-1-',
+      zoneCode: 'REC-ZONE',
+      locationCode: '3PL-WH-BKL',
+      status: 'In bin',
+      lastMovedAt: at(1),
+      contents: [
+        { itemNo: 'ITM_KL_0128', description: 'Galvanized Wires', lotNo: '', serialNo: '', qty: 200, uom: 'ROLL' },
+      ],
+      history: [],
     },
   };
 }

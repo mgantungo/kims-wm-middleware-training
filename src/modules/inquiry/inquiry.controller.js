@@ -57,4 +57,15 @@ async function pallet(req, res) {
   res.json(result);
 }
 
-module.exports = { item, bin, bins, pallet };
+/// POST /inquiry/pallet/move — moves a whole pallet (everything on it) to
+/// another bin. Live, never queued: the operator is standing at the new
+/// bin. Body: { palletNo, toBinCode }.
+async function movePallet(req, res) {
+  const { palletNo, toBinCode } = req.body || {};
+  if (!palletNo || !toBinCode) throw ApiError.badRequest('palletNo and toBinCode are required.');
+  const by = req.user && (req.user.username || req.user.sub);
+  const result = await dataSource.movePallet({ palletNo, toBinCode, by: by || null });
+  res.json(result);
+}
+
+module.exports = { item, bin, bins, pallet, movePallet };

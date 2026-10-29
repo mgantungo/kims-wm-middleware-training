@@ -1706,6 +1706,7 @@ class BusinessCentralDataSource {
   }
 
   async trackPallet() { return this._notImplemented('trackPallet'); }
+  async movePallet() { return this._notImplemented('movePallet'); }
 
   // Item Transfer — document-driven: expected to map onto Business
   // Central's warehouse internal movement journal (or item journal,

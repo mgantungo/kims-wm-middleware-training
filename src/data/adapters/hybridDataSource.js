@@ -205,6 +205,7 @@ class HybridDataSource {
   }
 
   async trackPallet(...args) { return this._demo.trackPallet(...args); }
+  async movePallet(...args) { return this._demo.movePallet(...args); }
 
   async getTransferDocuments(...args) { return this._demo.getTransferDocuments(...args); }
   async getTransferDocument(...args) { return this._demo.getTransferDocument(...args); }
