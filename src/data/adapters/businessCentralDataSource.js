@@ -1,5 +1,6 @@
 // src/data/adapters/businessCentralDataSource.js
 const ApiError = require('../../utils/apiError');
+const { getBcEndpoints } = require('./bcEndpoints');
 const logger = require('../../utils/logger');
 
 /**
@@ -139,6 +140,14 @@ class BusinessCentralDataSource {
     this.config = config;
   }
 
+  /// The Business Central address(es) every call goes through — see
+  /// bcEndpoints.js (BC_BASE_URL may list several; the one that answers is
+  /// used, a write is never resent to another address once it may have
+  /// arrived).
+  _endpoints() {
+    return getBcEndpoints(this.config);
+  }
+
   _notImplemented(method) {
     throw ApiError.internal(
       `Business Central integration for "${method}" is not implemented yet. Set DATA_SOURCE=demo in .env until it is.`,
@@ -162,12 +171,12 @@ class BusinessCentralDataSource {
       );
     }
 
-    const url = `${baseUrl}/companies(${companyId})/${pathAndQuery}`;
+    const path = `/companies(${companyId})/${pathAndQuery}`;
     const authHeader = `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`;
 
     let response;
     try {
-      response = await fetch(url, { headers: { Authorization: authHeader, Accept: 'application/json' } });
+      response = await this._endpoints().fetch(path, { headers: { Authorization: authHeader, Accept: 'application/json' } });
     } catch (error) {
       throw ApiError.internal(`Could not reach Business Central: ${error.message}`, 'BC_NETWORK_ERROR');
     }
@@ -200,12 +209,12 @@ class BusinessCentralDataSource {
       );
     }
 
-    const url = `${baseUrl}/companies(${companyId})/${pathAndQuery}`;
+    const path = `/companies(${companyId})/${pathAndQuery}`;
     const authHeader = `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`;
 
     let response;
     try {
-      response = await fetch(url, {
+      response = await this._endpoints().fetch(path, {
         method: 'PATCH',
         headers: {
           Authorization: authHeader,
@@ -257,12 +266,12 @@ class BusinessCentralDataSource {
       );
     }
 
-    const url = `${baseUrl}/companies(${companyId})/${pathAndQuery}`;
+    const path = `/companies(${companyId})/${pathAndQuery}`;
     const authHeader = `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`;
 
     let response;
     try {
-      response = await fetch(url, {
+      response = await this._endpoints().fetch(path, {
         method: 'POST',
         headers: {
           Authorization: authHeader,

@@ -106,8 +106,19 @@ if (!['demo', 'businessCentral'].includes(ITEM_INQUIRY_SOURCE)) {
 // DATA_SOURCE=hybrid with any of the per-module source flags set to
 // businessCentral. A demo-only deployment never touches these and
 // shouldn't have to set them.
+//
+// BC_BASE_URL may list more than one address, comma separated, in order of
+// preference — the middleware uses the first one that answers and moves to
+// the next when it can't be reached (see data/adapters/bcEndpoints.js).
+// BC_FAILBACK_MINUTES (default 5): how often to try the first address
+// again after moving off it.
+const bcBaseUrls = String(process.env.BC_BASE_URL || '')
+  .split(/[,\s]+/)
+  .map((u) => u.trim().replace(/\/+$/, ''))
+  .filter((u, i, all) => u && all.indexOf(u) === i);
+
 const businessCentral = {
-  baseUrl: process.env.BC_BASE_URL || null,
+  baseUrl: bcBaseUrls[0] || null,
   companyId: process.env.BC_COMPANY_ID || null,
   username: process.env.BC_USERNAME || null,
   password: process.env.BC_PASSWORD || null,
@@ -143,6 +154,11 @@ if (businessCentralInUse) {
   }
 }
 
+// Added after the missing-value check above, which looks at the four
+// required values only.
+businessCentral.baseUrls = bcBaseUrls;
+businessCentral.failbackMinutes = parseInt(process.env.BC_FAILBACK_MINUTES || '5', 10);
+
 module.exports = {
   env: KIMS_ENV,
   port: parseInt(process.env.PORT || '3000', 10),
@@ -166,4 +182,5 @@ module.exports = {
     .map((s) => s.trim())
     .filter(Boolean),
   businessCentral,
+  businessCentralInUse,
 };
