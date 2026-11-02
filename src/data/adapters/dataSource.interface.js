@@ -310,19 +310,39 @@
  *   Business-Central-only (demo's _binRegistry has no such metadata).
  *   Never guess a value for a field the current source can't actually
  *   provide — omit it, same convention as searchBin.
- * trackPallet(palletId)                 -> { palletNo, binCode, zoneCode,
+ * trackPallet(palletId, { locationCode? }) -> { palletNo, binCode, zoneCode,
  *                                            locationCode, status, lastMovedAt,
+ *                                            bins: [{ binCode, zoneCode,
+ *                                            locationCode, qty, lineCount }],
+ *                                            splitAcrossBins,
  *                                            contents: [{ itemNo, description,
- *                                            lotNo, serialNo, qty, uom }],
+ *                                            variantCode, lotNo, serialNo, qty,
+ *                                            uom, binCode, zoneCode,
+ *                                            locationCode }],
  *                                            history: [{ at, fromBinCode,
- *                                            toBinCode, by }] }
- *   A pallet sits in ONE bin and its contents move together. 404 when the
- *   pallet is not known. (Legacy palletId / lastLocation / lastTimestamp
- *   and name / sku / batch / units are also returned for older builds.)
+ *                                            toBinCode, by }], historyAvailable,
+ *                                            summary: { itemCount, lineCount,
+ *                                            lotCount, serialCount, totalQty,
+ *                                            binCount, uom }, lastSyncedAt }
+ *   A pallet sits in ONE bin and its contents move together. 404
+ *   PALLET_NOT_FOUND when the pallet is not known AT [locationCode] (the
+ *   operator's own, from the JWT) — a pallet at another location is "not
+ *   found", never shown. Business Central: Section 2.12, GET
+ *   palletContents?$filter=palletNo eq '...'; one row per item / lot /
+ *   serial, each with its bin. bins / splitAcrossBins cover the case of
+ *   Business Central reporting a pallet's stock in more than one bin
+ *   (binCode is then the bin holding the most). Business Central has no
+ *   move history: history is [] with historyAvailable: false and
+ *   lastMovedAt null. qty is always in the item's base UoM; summary.uom is
+ *   null when lines use different units. demoDataSource.js ignores
+ *   locationCode. (Legacy palletId / lastLocation / lastTimestamp and
+ *   name / sku / batch / units are also returned for older builds.)
+ *   Routed by PALLET_TRACKING_SOURCE in hybrid mode.
  * movePallet({ palletNo, toBinCode, by })-> { ok, fromBinCode, pallet }
  *   Moves the whole pallet to another bin. Live, never queued. 400 with a
  *   readable reason when the bin is unknown, doesn't take pallets or is
- *   full. Demo only for now — no Business Central endpoint is documented.
+ *   full. Demo only for now — no Business Central endpoint is documented
+ *   (always demo in hybrid mode, whatever PALLET_TRACKING_SOURCE says).
  *
  * -- Quarantine (document-driven, per Klan's control requirement: same
  * pattern as Item Transfer above — the plan comes from Business Central,

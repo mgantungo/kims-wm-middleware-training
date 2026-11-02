@@ -99,6 +99,14 @@ if (!['demo', 'businessCentral'].includes(ITEM_INQUIRY_SOURCE)) {
   throw new Error(`ITEM_INQUIRY_SOURCE must be "demo" or "businessCentral", got "${ITEM_INQUIRY_SOURCE}"`);
 }
 
+// Pallet Tracking — read-only lookup (Section 2.12 palletContents).
+// demo | businessCentral. Moving a pallet always stays on demo (no Business
+// Central endpoint for it is documented).
+const PALLET_TRACKING_SOURCE = process.env.PALLET_TRACKING_SOURCE || 'demo';
+if (!['demo', 'businessCentral'].includes(PALLET_TRACKING_SOURCE)) {
+  throw new Error(`PALLET_TRACKING_SOURCE must be "demo" or "businessCentral", got "${PALLET_TRACKING_SOURCE}"`);
+}
+
 // Business Central uses HTTP Basic Auth (username + Web Service Access
 // Key), not OAuth2 — see the KIMS-WM API Endpoint Reference doc, Section
 // 1. Only required when Business Central is ACTUALLY reachable through
@@ -133,7 +141,8 @@ const businessCentralInUse =
       BIN_INQUIRY_SOURCE === 'businessCentral' ||
       PICK_READ_SOURCE === 'businessCentral' ||
       PICK_CONFIRM_SOURCE === 'businessCentral' ||
-      ITEM_INQUIRY_SOURCE === 'businessCentral'));
+      ITEM_INQUIRY_SOURCE === 'businessCentral' ||
+      PALLET_TRACKING_SOURCE === 'businessCentral'));
 
 if (businessCentralInUse) {
   const missing = Object.entries(businessCentral)
@@ -145,7 +154,7 @@ if (businessCentralInUse) {
         ? `, PUT_AWAY_READ_SOURCE=${PUT_AWAY_READ_SOURCE}, PUT_AWAY_CONFIRM_SOURCE=${PUT_AWAY_CONFIRM_SOURCE}, ` +
           `PUT_AWAY_SPLIT_SOURCE=${PUT_AWAY_SPLIT_SOURCE}, BIN_INQUIRY_SOURCE=${BIN_INQUIRY_SOURCE}, ` +
           `PICK_READ_SOURCE=${PICK_READ_SOURCE}, PICK_CONFIRM_SOURCE=${PICK_CONFIRM_SOURCE}, ` +
-          `ITEM_INQUIRY_SOURCE=${ITEM_INQUIRY_SOURCE}`
+          `ITEM_INQUIRY_SOURCE=${ITEM_INQUIRY_SOURCE}, PALLET_TRACKING_SOURCE=${PALLET_TRACKING_SOURCE}`
         : '';
     throw new Error(
       `Business Central is in use (DATA_SOURCE=${DATA_SOURCE}${hybridDetail}) ` +
@@ -170,6 +179,7 @@ module.exports = {
   pickReadSource: PICK_READ_SOURCE,
   pickConfirmSource: PICK_CONFIRM_SOURCE,
   itemInquirySource: ITEM_INQUIRY_SOURCE,
+  palletTrackingSource: PALLET_TRACKING_SOURCE,
   jwt: {
     secret: required('JWT_SECRET'),
     expiresIn: process.env.JWT_EXPIRES_IN || '12h',

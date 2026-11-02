@@ -10,7 +10,7 @@ const BusinessCentralDataSource = require('./businessCentralDataSource');
  * breaks every module Business Central integration hasn't reached yet
  * (Transfer, Quarantine, Verify & Pack, etc. all throw BC_NOT_IMPLEMENTED
  * the moment that flag flips). Migrated so far: Put Away, Bin Inquiry,
- * Pick, Item Inquiry.
+ * Pick, Item Inquiry, Pallet Tracking (lookup only).
  *
  * Put Away's read (getPutAwayDocuments/getPutAwayDocument) and confirm
  * (confirmPutAwayItem) are routed INDEPENDENTLY, each behind its own env
@@ -36,6 +36,7 @@ class HybridDataSource {
     pickReadSource,
     pickConfirmSource,
     itemInquirySource,
+    palletTrackingSource,
   }) {
     this._demo = demoDataSource;
     this._bc = new BusinessCentralDataSource(businessCentralConfig);
@@ -62,6 +63,8 @@ class HybridDataSource {
     // Item Inquiry — its own read-only module, same pattern as Bin
     // Inquiry: one flag, no confirm side.
     this._itemInquirySource = itemInquirySource || process.env.ITEM_INQUIRY_SOURCE || 'demo';
+    // Pallet Tracking — read-only, one flag, same pattern as Item Inquiry.
+    this._palletTrackingSource = palletTrackingSource || process.env.PALLET_TRACKING_SOURCE || 'demo';
   }
 
   /// For the startup log line, so the terminal shows where Pick is routed.
@@ -91,6 +94,10 @@ class HybridDataSource {
 
   _itemInquiryTarget() {
     return this._itemInquirySource === 'businessCentral' ? this._bc : this._demo;
+  }
+
+  _palletTrackingTarget() {
+    return this._palletTrackingSource === 'businessCentral' ? this._bc : this._demo;
   }
 
   _binInquiryTarget() {
@@ -204,7 +211,17 @@ class HybridDataSource {
     return this._binInquiryTarget().listBins(...args);
   }
 
-  async trackPallet(...args) { return this._demo.trackPallet(...args); }
+  /// Pallet Tracking — routed by PALLET_TRACKING_SOURCE. Read-only
+  /// (Section 2.12). Second argument ({ locationCode }) passes straight
+  /// through; see businessCentralDataSource.js's trackPallet.
+  async trackPallet(...args) {
+    return this._palletTrackingTarget().trackPallet(...args);
+  }
+
+  /// Always demo: Business Central has no documented pallet-move endpoint.
+  /// Note that with PALLET_TRACKING_SOURCE=businessCentral a real pallet
+  /// number is unknown to the demo data, so a move answers 404 — the app's
+  /// Pallet Tracking screen is lookup-only for this reason.
   async movePallet(...args) { return this._demo.movePallet(...args); }
 
   async getTransferDocuments(...args) { return this._demo.getTransferDocuments(...args); }

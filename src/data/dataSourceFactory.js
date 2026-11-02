@@ -35,7 +35,7 @@ if (config.dataSource === 'businessCentral') {
     `Data source: hybrid (Put Away reads: ${config.putAwayReadSource}, Put Away confirm: ${config.putAwayConfirmSource}, ` +
       `Put Away split: ${config.putAwaySplitSource}, Bin Inquiry: ${config.binInquirySource}, ` +
       `Pick reads: ${config.pickReadSource}, Pick confirm: ${config.pickConfirmSource}, ` +
-      `Item Inquiry: ${config.itemInquirySource})`,
+      `Item Inquiry: ${config.itemInquirySource}, Pallet Tracking: ${config.palletTrackingSource})`,
   );
   dataSource = new HybridDataSource({
     businessCentralConfig: config.businessCentral,
@@ -46,6 +46,7 @@ if (config.dataSource === 'businessCentral') {
     pickReadSource: config.pickReadSource,
     pickConfirmSource: config.pickConfirmSource,
     itemInquirySource: config.itemInquirySource,
+    palletTrackingSource: config.palletTrackingSource,
   });
 } else {
   logger.info('Data source: demo (in-memory)');

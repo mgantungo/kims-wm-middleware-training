@@ -50,10 +50,23 @@ async function bins(req, res) {
   res.json(result);
 }
 
+/// GET /inquiry/pallet?id=... (or ?palletNo=...) — what a pallet holds and
+/// which bin it is in (Business Central Section 2.12). Scoped to the
+/// operator's location the same way as bin() above: the operator's own
+/// verified location always wins; a client-supplied locationCode is only
+/// used when the operator has none yet. Section 2.12 has no location
+/// filter, so the adapter drops other locations' rows itself.
 async function pallet(req, res) {
-  const id = req.query.id;
+  const raw = req.query.id || req.query.palletNo;
+  const id = typeof raw === 'string' ? raw.trim() : '';
   if (!id) throw ApiError.badRequest('Query parameter "id" is required.');
-  const result = await dataSource.trackPallet(id);
+  const locationCode = (req.user && req.user.locationCode) || req.query.locationCode;
+  const result = await dataSource.trackPallet(id, { locationCode });
+  // Defence in depth, same as bin(): notFound, not forbidden — an operator
+  // outside this pallet's location shouldn't learn that it exists.
+  assertVisible(result.locationCode, req, () => {
+    throw ApiError.notFound(`Pallet "${id}" was not found.`, 'PALLET_NOT_FOUND');
+  });
   res.json(result);
 }
 

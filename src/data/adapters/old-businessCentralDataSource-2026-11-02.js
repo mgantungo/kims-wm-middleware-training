@@ -1,5 +1,6 @@
 // src/data/adapters/businessCentralDataSource.js
 const ApiError = require('../../utils/apiError');
+const { getBcEndpoints } = require('./bcEndpoints');
 const logger = require('../../utils/logger');
 
 /**
@@ -139,6 +140,14 @@ class BusinessCentralDataSource {
     this.config = config;
   }
 
+  /// The Business Central address(es) every call goes through — see
+  /// bcEndpoints.js (BC_BASE_URL may list several; the one that answers is
+  /// used, a write is never resent to another address once it may have
+  /// arrived).
+  _endpoints() {
+    return getBcEndpoints(this.config);
+  }
+
   _notImplemented(method) {
     throw ApiError.internal(
       `Business Central integration for "${method}" is not implemented yet. Set DATA_SOURCE=demo in .env until it is.`,
@@ -162,12 +171,12 @@ class BusinessCentralDataSource {
       );
     }
 
-    const url = `${baseUrl}/companies(${companyId})/${pathAndQuery}`;
+    const path = `/companies(${companyId})/${pathAndQuery}`;
     const authHeader = `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`;
 
     let response;
     try {
-      response = await fetch(url, { headers: { Authorization: authHeader, Accept: 'application/json' } });
+      response = await this._endpoints().fetch(path, { headers: { Authorization: authHeader, Accept: 'application/json' } });
     } catch (error) {
       throw ApiError.internal(`Could not reach Business Central: ${error.message}`, 'BC_NETWORK_ERROR');
     }
@@ -200,12 +209,12 @@ class BusinessCentralDataSource {
       );
     }
 
-    const url = `${baseUrl}/companies(${companyId})/${pathAndQuery}`;
+    const path = `/companies(${companyId})/${pathAndQuery}`;
     const authHeader = `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`;
 
     let response;
     try {
-      response = await fetch(url, {
+      response = await this._endpoints().fetch(path, {
         method: 'PATCH',
         headers: {
           Authorization: authHeader,
@@ -257,12 +266,12 @@ class BusinessCentralDataSource {
       );
     }
 
-    const url = `${baseUrl}/companies(${companyId})/${pathAndQuery}`;
+    const path = `/companies(${companyId})/${pathAndQuery}`;
     const authHeader = `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`;
 
     let response;
     try {
-      response = await fetch(url, {
+      response = await this._endpoints().fetch(path, {
         method: 'POST',
         headers: {
           Authorization: authHeader,
@@ -1219,13 +1228,19 @@ class BusinessCentralDataSource {
     if (locationCode) filter += ` and locationCode eq '${esc(locationCode)}'`;
     const data = await this._bcGet(`Bins?$filter=${filter}&$expand=binContentLines($expand=palletAndLots)`);
     const bin = (data.value || [])[0];
+    const asked = { binCode, sku, lotNo: lotNo || null, serialNo: serialNo || null, locationCode: locationCode || null };
     if (!bin) {
+      logger.warn({ ...asked, binsFound: (data.value || []).length }, 'Pick bin check: bin not found');
       return { available: false, reason: `Bin "${binCode}" is not recognized at this location.` };
     }
 
     const norm = (v) => String(v || '').trim().toUpperCase();
     const lines = (bin.binContentLines || []).filter((l) => norm(l.itemNo) === norm(sku));
     if (lines.length === 0) {
+      logger.warn(
+        { ...asked, binLocation: bin.locationCode, itemsInBin: (bin.binContentLines || []).map((l) => l.itemNo) },
+        'Pick bin check: item not in bin contents',
+      );
       return { available: false, reason: `Bin ${bin.binCode} holds no ${sku}.` };
     }
 
@@ -1244,6 +1259,17 @@ class BusinessCentralDataSource {
     }
 
     if (qty <= 0) {
+      logger.warn(
+        {
+          ...asked,
+          binLocation: bin.locationCode,
+          lines: lines.map((l) => ({
+            quantity: l.quantity,
+            lots: (l.palletAndLots || []).map((x) => ({ lotNo: x.lotNo, serialNo: x.serialNo, quantity: x.quantity })),
+          })),
+        },
+        'Pick bin check: no stock of this lot / serial in the bin',
+      );
       const what = [sku, lotNo ? `lot ${lotNo}` : null, serialNo ? `serial ${serialNo}` : null].filter(Boolean).join(' ');
       return { available: false, reason: `Bin ${bin.binCode} holds no stock of ${what}.` };
     }
@@ -1697,6 +1723,7 @@ class BusinessCentralDataSource {
   }
 
   async trackPallet() { return this._notImplemented('trackPallet'); }
+  async movePallet() { return this._notImplemented('movePallet'); }
 
   // Item Transfer — document-driven: expected to map onto Business
   // Central's warehouse internal movement journal (or item journal,
@@ -1710,6 +1737,8 @@ class BusinessCentralDataSource {
   async validateTransferSplitBin() { return this._notImplemented('validateTransferSplitBin'); }
   async suggestTransferSplitBin() { return this._notImplemented('suggestTransferSplitBin'); }
   async confirmTransferItem() { return this._notImplemented('confirmTransferItem'); }
+  async saveTransfer() { return this._notImplemented('saveTransfer'); }
+  async registerTransfer() { return this._notImplemented('registerTransfer'); }
 
   // Quarantine — document-driven, same BC movement mechanism as Item
   // Transfer, plus whatever field BC uses to record a quarantine reason

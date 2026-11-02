@@ -75,6 +75,9 @@ function toNumber(v) {
  * Register) and registerPick (2.11) — see the Pick section below.
  * Item Inquiry (2026-10): searchItem (Section 2.3.1 itemInquiries, by
  * barcode, then item number, then name via the 2.3 catalog).
+ * Pallet Tracking (2026-11): trackPallet (Section 2.12 palletContents,
+ * read-only, scoped to the operator's location here). movePallet stays
+ * _notImplemented() — no move endpoint is documented.
  *
  * Still `_notImplemented()`: validatePutAwayBin/suggestPutAwayBin. Not an
  * oversight — the documented /Bins endpoint has no capacity field, so
@@ -1722,7 +1725,163 @@ class BusinessCentralDataSource {
     };
   }
 
-  async trackPallet() { return this._notImplemented('trackPallet'); }
+  // ------------------------------------------------------------------
+  // Pallet Tracking — KIMS-WM API doc v2, Section 2.12
+  // (GET palletContents?$filter=palletNo eq '...').
+  //
+  // A pallet is Business Central's Package No. — the same tracking
+  // dimension Section 2.2.2 shows as palletAndLots[].packageNo. The
+  // endpoint is read-only: one row per item / lot / serial on the pallet,
+  // each carrying the bin it is in. Rows have no id; a row is identified
+  // by palletNo + binCode + itemNo + lotNo / serialNo. Only stock received
+  // with a Package No. appears — a pallet Business Central doesn't know
+  // comes back as an EMPTY list, not an error, so "not found" is decided
+  // here.
+  // ------------------------------------------------------------------
+
+  /// Rows for one pallet number, or [] when there are none. The filter is
+  /// URL-encoded the same way as _fetchItemInquiry, so a pallet number
+  /// with a quote, space, & or # cannot break the query.
+  async _fetchPalletRows(palletNo) {
+    const escaped = String(palletNo).replace(/'/g, "''");
+    const expr = encodeURIComponent(`palletNo eq '${escaped}'`).replace(/'/g, '%27');
+    try {
+      const data = await this._bcGet(`palletContents?$filter=${expr}`);
+      logger.debug({ palletNo, rawBcResponse: data }, 'Raw Business Central response — GET palletContents');
+      return data.value || [];
+    } catch (error) {
+      // Treated like an empty answer, the same as itemInquiries' "could not
+      // be found" — never a failure of the lookup itself.
+      if (/could not be found/i.test(error.message || '')) return [];
+      throw error;
+    }
+  }
+
+  /// Pallet Tracking's lookup. [palletId] is whatever was scanned or
+  /// typed. [locationCode] (the operator's own, from the JWT) keeps only
+  /// that location's rows — Section 2.12 takes no location filter, so it
+  /// is applied here. A pallet that exists only at ANOTHER location is
+  /// reported as not found, the same as Bin Inquiry: an operator should not
+  /// learn what is on pallets elsewhere.
+  ///
+  /// The number is tried exactly as scanned first (the doc: "use the pallet
+  /// number exactly as recorded"), then upper-cased — Package No. is a
+  /// Business Central Code field, stored upper-case, so a label typed in
+  /// lower case still matches.
+  async trackPallet(palletId, { locationCode } = {}) {
+    const value = String(palletId || '').trim();
+    if (!value) throw ApiError.badRequest('Scan a pallet label or enter a pallet number.');
+
+    let rows = await this._fetchPalletRows(value);
+    if (rows.length === 0 && value.toUpperCase() !== value) {
+      rows = await this._fetchPalletRows(value.toUpperCase());
+    }
+
+    const norm = (v) => String(v || '').trim();
+    const scoped = locationCode
+      ? rows.filter((r) => norm(r.locationCode).toUpperCase() === norm(locationCode).toUpperCase())
+      : rows;
+
+    if (scoped.length === 0) {
+      throw ApiError.notFound(
+        locationCode ? `Pallet "${value}" not found for location ${locationCode}.` : `Pallet "${value}" was not found.`,
+        'PALLET_NOT_FOUND',
+      );
+    }
+    return this._mapPallet(scoped, value);
+  }
+
+  /// Maps Section 2.12's rows onto the app's pallet shape — the same top
+  /// level demoDataSource.js's trackPallet returns (palletNo, binCode,
+  /// zoneCode, locationCode, status, contents, history), plus what only
+  /// Business Central has (variant, per-row bin, summary).
+  ///
+  /// A pallet normally sits in ONE bin. binCode is stored per row, though,
+  /// so if Business Central ever reports the pallet's stock in more than one
+  /// bin, [bins] lists every one, [binCode] is the bin holding the most of
+  /// it, and [splitAcrossBins] is true so the app can say so rather than
+  /// show one bin as if it held everything.
+  ///
+  /// Business Central has no move history or last-moved date for a pallet:
+  /// history is [] with historyAvailable: false, and lastMovedAt is null —
+  /// never a made-up value.
+  _mapPallet(rows, query) {
+    const norm = (v) => String(v || '').trim();
+
+    const contents = rows
+      .map((r) => ({
+        itemNo: norm(r.itemNo),
+        description: norm(r.itemDesc) || norm(r.itemNo),
+        variantCode: norm(r.variantCode),
+        lotNo: norm(r.lotNo),
+        serialNo: norm(r.serialNo),
+        qty: toNumber(r.quantity),
+        // Always the item's base unit of measure (Section 2.12).
+        uom: norm(r.unitOfMeasureCode),
+        binCode: norm(r.binCode),
+        zoneCode: norm(r.zoneCode),
+        locationCode: norm(r.locationCode),
+      }))
+      .sort((a, b) =>
+        [a.binCode, a.itemNo, a.variantCode, a.lotNo, a.serialNo].join('|').localeCompare(
+          [b.binCode, b.itemNo, b.variantCode, b.lotNo, b.serialNo].join('|'),
+        ));
+
+    // One entry per bin the pallet's stock is in, most quantity first.
+    const binMap = new Map();
+    for (const c of contents) {
+      const key = `${c.locationCode}|${c.binCode}`;
+      const bin = binMap.get(key) || { binCode: c.binCode, zoneCode: c.zoneCode, locationCode: c.locationCode, qty: 0, lineCount: 0 };
+      bin.qty += c.qty;
+      bin.lineCount += 1;
+      binMap.set(key, bin);
+    }
+    const bins = [...binMap.values()].sort((a, b) => b.qty - a.qty || a.binCode.localeCompare(b.binCode));
+    const main = bins[0];
+
+    const palletNo = norm(rows[0].palletNo) || query;
+    const items = new Set(contents.map((c) => `${c.itemNo}|${c.variantCode}`));
+
+    return {
+      palletNo,
+      binCode: main.binCode,
+      zoneCode: main.zoneCode || null,
+      locationCode: main.locationCode,
+      bins,
+      splitAcrossBins: bins.length > 1,
+      status: bins.length > 1 ? `Split across ${bins.length} bins` : 'In bin',
+      lastMovedAt: null,
+      contents: contents.map((c) => ({
+        ...c,
+        // Legacy shape, kept so older app builds still show something.
+        name: c.description,
+        sku: c.itemNo,
+        batch: c.lotNo || c.serialNo,
+        units: c.qty,
+      })),
+      history: [],
+      historyAvailable: false,
+      summary: {
+        itemCount: items.size,
+        lineCount: contents.length,
+        lotCount: new Set(contents.filter((c) => c.lotNo).map((c) => c.lotNo)).size,
+        serialCount: contents.filter((c) => c.serialNo).length,
+        totalQty: contents.reduce((sum, c) => sum + c.qty, 0),
+        binCount: bins.length,
+        // Quantities can only be added up when every line shares one unit.
+        uom: new Set(contents.map((c) => c.uom)).size === 1 ? contents[0].uom : null,
+      },
+      query,
+      lastSyncedAt: new Date().toISOString(),
+      // Legacy shape.
+      palletId: palletNo,
+      lastLocation: `${main.binCode}${main.zoneCode ? ` · Zone ${main.zoneCode}` : ''}`,
+      lastTimestamp: null,
+    };
+  }
+
+  /// No Business Central endpoint for moving a pallet is documented yet —
+  /// Section 2.12 is read-only.
   async movePallet() { return this._notImplemented('movePallet'); }
 
   // Item Transfer — document-driven: expected to map onto Business

@@ -13,7 +13,9 @@ router.get('/item', asyncHandler(controller.item));
 router.get('/bin', asyncHandler(controller.bin));
 // GET /inquiry/bins — the full bins list ("browse all", not a single lookup)
 router.get('/bins', asyncHandler(controller.bins));
-// GET /inquiry/pallet?id=... — the pallet, its bin, contents and moves
+// GET /inquiry/pallet?id=...[&locationCode=...] — the pallet, its bin and
+// contents (BC Section 2.12 palletContents), scoped to the operator's
+// location. ?palletNo= is accepted as well as ?id=.
 router.get('/pallet', asyncHandler(controller.pallet));
 // POST /inquiry/pallet/move — { palletNo, toBinCode }: the whole pallet to another bin
 router.post('/pallet/move', asyncHandler(controller.movePallet));

@@ -482,7 +482,12 @@ class DemoDataSource {
   /// The legacy fields (palletId, lastLocation, lastTimestamp and
   /// name/sku/batch/units on each content line) are kept so older app
   /// builds still show something.
-  async trackPallet(palletId) {
+  /// The second argument ({ locationCode }) is accepted for signature
+  /// parity with businessCentralDataSource.js and ignored, the same as
+  /// demo listBins — the demo pallets would otherwise vanish for any
+  /// operator not at 3PL-WH-BKL.
+  // eslint-disable-next-line no-unused-vars
+  async trackPallet(palletId, { locationCode } = {}) {
     const pallet = this._findPallet(palletId);
     if (!pallet) throw ApiError.notFound(`Pallet "${palletId}" was not found.`);
     return this._palletView(pallet);
@@ -519,24 +524,51 @@ class DemoDataSource {
     return Object.values(this._pallets).find((p) => p.palletNo.toUpperCase() === key) || null;
   }
 
+  /// Same shape as businessCentralDataSource.js's _mapPallet: every content
+  /// line carries its bin, plus bins / splitAcrossBins / summary. A demo
+  /// pallet is always in exactly one bin.
   _palletView(p) {
     const contents = p.contents.map((c) => ({
       ...c,
+      variantCode: c.variantCode || '',
+      binCode: p.binCode,
+      zoneCode: p.zoneCode,
+      locationCode: p.locationCode,
       // legacy shape
       name: c.description,
       sku: c.itemNo,
-      batch: c.lotNo || '',
+      batch: c.lotNo || c.serialNo || '',
       units: c.qty,
     }));
+    const uoms = new Set(contents.map((c) => c.uom));
     return {
       palletNo: p.palletNo,
       binCode: p.binCode,
       zoneCode: p.zoneCode,
       locationCode: p.locationCode,
+      bins: [{
+        binCode: p.binCode,
+        zoneCode: p.zoneCode,
+        locationCode: p.locationCode,
+        qty: contents.reduce((sum, c) => sum + c.qty, 0),
+        lineCount: contents.length,
+      }],
+      splitAcrossBins: false,
       status: p.status,
       lastMovedAt: p.lastMovedAt,
       contents,
       history: p.history,
+      historyAvailable: true,
+      summary: {
+        itemCount: new Set(contents.map((c) => `${c.itemNo}|${c.variantCode}`)).size,
+        lineCount: contents.length,
+        lotCount: new Set(contents.filter((c) => c.lotNo).map((c) => c.lotNo)).size,
+        serialCount: contents.filter((c) => c.serialNo).length,
+        totalQty: contents.reduce((sum, c) => sum + c.qty, 0),
+        binCount: 1,
+        uom: uoms.size === 1 ? [...uoms][0] : null,
+      },
+      lastSyncedAt: new Date().toISOString(),
       // legacy shape
       palletId: p.palletNo,
       lastLocation: `${p.binCode}${p.zoneCode ? ` · Zone ${p.zoneCode}` : ''}`,
