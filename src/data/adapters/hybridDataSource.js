@@ -189,6 +189,7 @@ class HybridDataSource {
   /// one system while saving and registering in the other would never
   /// line up.
   async getPickVerification(...args) { return this._pickConfirmTarget().getPickVerification(...args); }
+  async getPicksToVerify(...args) { return this._pickConfirmTarget().getPicksToVerify(...args); }
   async verifyPick(...args) { return this._pickConfirmTarget().verifyPick(...args); }
 
   // ---------------- Everything else — always demo until its own phase ----------------

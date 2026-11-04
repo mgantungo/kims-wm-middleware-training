@@ -414,6 +414,19 @@ class DemoDataSource {
     return { docId, bcPickId: null, locationCode: doc.locationCode || null, ...pickVerification.publicVerification(verification) };
   }
 
+  /// Demo counterpart to businessCentralDataSource.js's getPicksToVerify.
+  async getPicksToVerify() {
+    const picks = Object.values(this._pickDocs)
+      .map((doc) =>
+        pickVerification.readyToVerifyEntry(
+          { no: doc.docId, id: null, locationCode: doc.locationCode, assignedUserId: null, assignmentDate: doc.dueDate },
+          pickVerification.buildVerification(this._demoPickLines(doc)),
+        ),
+      )
+      .filter(Boolean);
+    return { picks };
+  }
+
   /// Demo counterpart to businessCentralDataSource.js's verifyPick — same
   /// payload, rules and response.
   async verifyPick(payload) {

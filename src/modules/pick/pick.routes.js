@@ -19,6 +19,9 @@ router.post('/check-bin', asyncHandler(controller.checkBin));
 // GET /pick/documents/:docId/verification — dispatch verification per
 // item / lot / serial group (BC Section 2.11). Live.
 router.get('/documents/:docId/verification', asyncHandler(controller.getVerification));
+// GET /pick/verification — picks with picked items waiting to be verified
+// (the app's Verify Pick list). Live.
+router.get('/verification', asyncHandler(controller.listToVerify));
 // POST /pick/verification — Verify (partial: false) / Partial Verify
 // (partial: true): the verifier's counts (BC Section 2.11.5). Live.
 // Not under /pick/verify — that path belongs to Verify & Pack (app.js).

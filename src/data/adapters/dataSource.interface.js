@@ -229,6 +229,14 @@
  *   verifiedUnits, outstandingUnits, fullyScanned, readyForPartialRegister,
  *   readyForRegister, problems: string[] }. Rules in
  *   modules/pick/pickVerification.js. Routed by PICK_CONFIRM_SOURCE.
+ * getPicksToVerify()                    -> { picks: [{ docId, bcPickId, locationCode,
+ *                                            assignedUserId, assignmentDate,
+ *                                            stagingBins, itemsToVerify,
+ *                                            itemsPicked, unitsToVerify,
+ *                                            pickedUnits, hasMismatch,
+ *                                            fullyScanned }] }
+ *   The "Verify Pick" list: picks with picked items not yet verified at the
+ *   picked quantity. Routed by PICK_CONFIRM_SOURCE.
  * verifyPick(payload)                   -> { ok, partial, verified, ...getPickVerification }
  *   payload: { docId, bcPickId?, partial?, counts: [{ groupKey,
  *   qtyVerified }] } — Section 2.11.5 ProcessBatchVerifications. partial

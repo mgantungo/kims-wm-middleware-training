@@ -299,7 +299,37 @@ function planVerification(verification, counts, { partial }) {
   return entries;
 }
 
+/**
+ * One pick's row in the "ready to verify" list: picked (saved to Business
+ * Central) items that are not verified at the picked quantity yet —
+ * awaiting a count, or counted short / over. Null when the pick has nothing
+ * to verify (nothing picked, or everything picked is already verified).
+ */
+function readyToVerifyEntry(header, verification) {
+  const { groups, summary } = verification;
+  const toVerify = groups.filter((g) => g.scanned > 0 && g.status !== STATUS.verified);
+  if (toVerify.length === 0) return null;
+  return {
+    docId: header.no,
+    bcPickId: header.id || null,
+    locationCode: header.locationCode || null,
+    assignedUserId: header.assignedUserId || null,
+    assignmentDate: header.assignmentDate || null,
+    stagingBins: [...new Set(groups.map((g) => g.stagingBin).filter(Boolean))],
+    itemsToVerify: toVerify.length,
+    itemsPicked: summary.scannedGroups,
+    unitsToVerify: toVerify.reduce((s, g) => s + g.scanned, 0),
+    pickedUnits: summary.scannedUnits,
+    // Some count was recorded and does not match — count again.
+    hasMismatch: toVerify.some((g) => g.status === STATUS.under || g.status === STATUS.over),
+    // The whole outstanding pick is picked: Verify (for Register Pick);
+    // otherwise Partial Verify (for Partial Register Pick).
+    fullyScanned: summary.fullyScanned,
+  };
+}
+
 module.exports = {
+  readyToVerifyEntry,
   STATUS,
   blocksRegister,
   groupKeyOf,

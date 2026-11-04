@@ -115,6 +115,14 @@ async function getVerification(req, res) {
   res.json(result);
 }
 
+/// GET /pick/verification — the "Verify Pick" list: picks with picked
+/// items waiting to be verified at dispatch (counted short / over
+/// included), scoped to the operator's location like the pick list.
+async function listToVerify(req, res) {
+  const result = await dataSource.getPicksToVerify();
+  res.json({ ...result, picks: filterByLocation(result.picks, req, (p) => p.locationCode) });
+}
+
 /// POST /pick/verification — VERIFY (partial: false, for Register Pick)
 /// or PARTIAL VERIFY (partial: true, for Partial Register Pick). Records
 /// the verifier's dispatch count per group (Section 2.11.5). Live, never
@@ -161,4 +169,14 @@ async function register(req, res) {
   res.status(200).json(result);
 }
 
-module.exports = { listDocuments, getDocument, getVerification, confirmItem, confirmBatch, checkBin, verify, register };
+module.exports = {
+  listDocuments,
+  getDocument,
+  getVerification,
+  listToVerify,
+  confirmItem,
+  confirmBatch,
+  checkBin,
+  verify,
+  register,
+};

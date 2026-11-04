@@ -1282,6 +1282,20 @@ class BusinessCentralDataSource {
     };
   }
 
+  /// The "Verify Pick" list: every pick with picked items not yet verified
+  /// at the picked quantity (Section 2.11) — one read of all picks with
+  /// their lines. Returns { picks: [readyToVerifyEntry] }, most items to
+  /// verify first.
+  async getPicksToVerify() {
+    const data = await this._bcGet('picks?$expand=pickLines');
+    const picks = (data.value || [])
+      .map((p) => pickVerification.readyToVerifyEntry(p, pickVerification.buildVerification(p.pickLines || [])))
+      .filter(Boolean)
+      .sort((a, b) => b.itemsToVerify - a.itemsToVerify || String(a.docId).localeCompare(String(b.docId)));
+    logger.info({ picks: picks.map((p) => `${p.docId}:${p.itemsToVerify}`) }, `Picks ready to verify: ${picks.length}`);
+    return { picks };
+  }
+
   /// VERIFY / PARTIAL VERIFY — Section 2.11.5, POST
   /// picks(bcPickId)/Microsoft.NAV.ProcessBatchVerifications (all or
   /// nothing). Payload: { docId, bcPickId, partial, counts: [{ groupKey,
