@@ -2,6 +2,7 @@
 const ApiError = require('../../utils/apiError');
 const { getBcEndpoints } = require('./bcEndpoints');
 const logger = require('../../utils/logger');
+const pickVerification = require('../../modules/pick/pickVerification');
 
 /**
  * SERIAL-TRACKED LINES ARE FULFILLED BY SCANNING THEIR SERIAL.
@@ -71,8 +72,10 @@ function toNumber(v) {
  * uses — see checkPutAwayBin's own doc for exactly what that can and
  * can't answer compared to the mocked demo version). Pick (2026-10):
  * getPickDocuments/getPickDocument (v2 doc Section 2.5), confirmPickItem
- * (2.9 UpdateLineScan), confirmPickBatch (2.10 ProcessBatchScans + 2.11
- * Register) and registerPick (2.11) — see the Pick section below.
+ * (2.9 UpdateLineScan), confirmPickBatch (2.10 ProcessBatchScans),
+ * getPickVerification / verifyPick (2.11 Pick Verification) and
+ * registerPick (2.12, behind the verification gate) — see the Pick
+ * section below.
  * Item Inquiry (2026-10): searchItem (Section 2.3.1 itemInquiries, by
  * barcode, then item number, then name via the 2.3 catalog).
  * Pallet Tracking (2026-11): trackPallet (Section 2.12 palletContents,
@@ -827,6 +830,11 @@ class BusinessCentralDataSource {
           qtyHandled: typeof line.qtyHandled === 'number' ? line.qtyHandled : null,
           qtyOutstanding: typeof line.qtyOutstanding === 'number' ? line.qtyOutstanding : null,
           qtyToHandle: typeof line.qtyToHandle === 'number' ? line.qtyToHandle : null,
+          // Dispatch verification (Section 2.11), as Business Central shows
+          // it on the Take line. Display only — the app reads the pick's
+          // verification from GET /pick/documents/:docId/verification.
+          qtyVerified: typeof line.qtyVerified === 'number' ? line.qtyVerified : null,
+          verificationStatus: line.verificationStatus || null,
         };
       })
       .filter((item) => item.qty > 0);
@@ -1104,7 +1112,7 @@ class BusinessCentralDataSource {
     return { ok: true, held: held.size, ...registerOutcome };
   }
 
-  /// Section 2.11 — POST picks(bcPickId)/Microsoft.NAV.Register, empty
+  /// Section 2.12 — POST picks(bcPickId)/Microsoft.NAV.Register, empty
   /// body. Business Central posts whatever is on Qty. to Handle on every
   /// Take line and leaves the rest outstanding — partial versus full is
   /// only a matter of what was saved first.
@@ -1122,6 +1130,12 @@ class BusinessCentralDataSource {
   /// nothing is posted. Without `expected` (older builds) it registers as
   /// before.
   ///
+  /// VERIFICATION GATE (always). Register is refused (409
+  /// PICK_NOT_VERIFIED, nothing posted) until every scanned group is
+  /// verified at exactly the scanned quantity — Verify for Register Pick,
+  /// Partial Verify for Partial Register Pick (see verifyPick and
+  /// modules/pick/pickVerification.js). Section 2.12.
+  ///
   /// Returns { ok, fullyRegistered } — fullyRegistered is true when the
   /// pick has no Take line left outstanding afterwards (or is gone).
   async registerPick(payload) {
@@ -1132,8 +1146,10 @@ class BusinessCentralDataSource {
       );
     }
 
+    // One fresh read serves both checks below.
+    const lines = await this._fetchPickLinesById(bcPickId);
+
     if (Array.isArray(expected)) {
-      const lines = await this._fetchPickLinesById(bcPickId);
       const norm = (v) => String(v || '').trim().toUpperCase();
       const takeLines = [...lines.values()].filter((l) => l.actionType === 'Take');
 
@@ -1193,6 +1209,12 @@ class BusinessCentralDataSource {
       }
     }
 
+    // VERIFICATION GATE (Section 2.12). Business Central checks the same
+    // and refuses, but its message arrives as a raw action error; checking
+    // here first gives the operator the groups to recount, and nothing is
+    // posted either way.
+    this._assertVerifiedForRegister([...lines.values()], bcPickId);
+
     logger.info({ bcPickId }, 'Pick → Business Central Register');
     await this._bcPost(`picks(${bcPickId})/Microsoft.NAV.Register`, {});
     logger.info({ bcPickId }, 'Pick registered');
@@ -1211,6 +1233,94 @@ class BusinessCentralDataSource {
       fullyRegistered = true;
     }
     return { ok: true, fullyRegistered };
+  }
+
+  /// Refuses Register (409 PICK_NOT_VERIFIED, nothing posted) unless every
+  /// scanned group of the pick is verified at exactly the scanned quantity.
+  /// Groups with nothing scanned are left open (Partial Register).
+  _assertVerifiedForRegister(lines, bcPickId) {
+    const { summary } = pickVerification.buildVerification(lines);
+    if (summary.scannedGroups === 0) {
+      throw ApiError.conflict('Nothing to register — nothing is picked on this pick yet.', 'PICK_NOTHING_TO_REGISTER');
+    }
+    if (summary.blockingGroups > 0) {
+      logger.warn({ bcPickId, problems: summary.problems }, 'Pick register refused — not verified');
+      throw ApiError.conflict(
+        `Register stopped — nothing was posted. Verify the pick first: ${summary.problems.join(' ')}`,
+        'PICK_NOT_VERIFIED',
+      );
+    }
+  }
+
+  /// Section 2.11 — the pick's verification as it stands in Business
+  /// Central: one group per item / variant / lot / serial, with what was
+  /// picked (Take lines' Qty. to Handle), what was verified (Place line's
+  /// qtyVerified) and the status. Payload: { docId, bcPickId? }. With
+  /// bcPickId the pick is read by id; otherwise by its number.
+  async getPickVerification(payload) {
+    const { docId, bcPickId } = payload || {};
+    let pick;
+    if (bcPickId) {
+      pick = await this._bcGet(`picks(${bcPickId})?$expand=pickLines`);
+    } else {
+      if (!docId) throw ApiError.badRequest('docId or bcPickId is required.');
+      const escaped = String(docId).replace(/'/g, "''");
+      const data = await this._bcGet(`picks?$expand=pickLines&$filter=no eq '${escaped}'`);
+      pick = (data.value || [])[0];
+    }
+    if (!pick) throw ApiError.notFound(`Pick document "${docId || bcPickId}" not found.`);
+    const verification = pickVerification.buildVerification(pick.pickLines || []);
+    logger.info(
+      { docId: pick.no, summary: verification.summary },
+      `Pick verification read: ${verification.summary.verifiedGroups} of ${verification.groups.length} group(s) verified`,
+    );
+    return {
+      docId: pick.no,
+      bcPickId: pick.id,
+      locationCode: pick.locationCode,
+      ...pickVerification.publicVerification(verification),
+    };
+  }
+
+  /// VERIFY / PARTIAL VERIFY — Section 2.11.5, POST
+  /// picks(bcPickId)/Microsoft.NAV.ProcessBatchVerifications (all or
+  /// nothing). Payload: { docId, bcPickId, partial, counts: [{ groupKey,
+  /// qtyVerified }] } — groupKey as returned by getPickVerification.
+  ///   partial false .. Verify, for Register Pick: refused unless the whole
+  ///                    outstanding pick is picked.
+  ///   partial true ... Partial Verify, for Partial Register Pick: what is
+  ///                    picked so far.
+  /// Either way every picked group must be counted. Counts are absolute, so
+  /// a retry is safe. A count that differs from what was picked is stored
+  /// (Business Central flags it Under- / Over-verified) and Register stays
+  /// blocked until it is recounted — the response says which groups.
+  /// Returns { ok, partial, verified, docId, bcPickId, groups, summary }.
+  async verifyPick(payload) {
+    const { bcPickId, counts } = payload || {};
+    const partial = payload && payload.partial === true;
+    if (!bcPickId) {
+      throw ApiError.badRequest(
+        'verifyPick requires bcPickId — this pick was not read from Business Central, so there is nothing to verify.',
+      );
+    }
+    const before = await this._bcGet(`picks(${bcPickId})?$expand=pickLines`);
+    const verification = pickVerification.buildVerification((before && before.pickLines) || []);
+    let entries;
+    try {
+      entries = pickVerification.planVerification(verification, counts, { partial });
+    } catch (e) {
+      throw e.status === 409 ? ApiError.conflict(e.message, e.code) : ApiError.badRequest(e.message, e.code);
+    }
+
+    logger.info({ bcPickId, partial, entries }, `Pick ${partial ? 'partial verify' : 'verify'} → Business Central ProcessBatchVerifications`);
+    await this._bcPost(`picks(${bcPickId})/Microsoft.NAV.ProcessBatchVerifications`, {
+      verifiedPayload: JSON.stringify(entries),
+    });
+
+    const after = await this.getPickVerification({ bcPickId });
+    const verified = partial ? after.summary.readyForPartialRegister : after.summary.readyForRegister;
+    logger.info({ bcPickId, partial, verified, summary: after.summary }, 'Pick verification recorded');
+    return { ok: true, partial, verified, ...after };
   }
 
   /// Live check for the bin an operator scanned to TAKE a pick line from.

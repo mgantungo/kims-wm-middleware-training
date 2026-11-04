@@ -9,7 +9,7 @@ const { assertVisible, filterByLocation } = require('../../utils/locationAccess'
  * reaches Business Central or demo data. See dataSource.interface.js for the
  * payload and response shapes, and businessCentralDataSource.js's Pick
  * section for how they map onto the KIMS-WM API doc (Sections 2.5, 2.9,
- * 2.10, 2.11).
+ * 2.10, 2.11 Verification, 2.12 Register).
  *
  * bcPickId / bcLineId (and lotNo / serialNo) are optional and additive, as
  * in Put Away: present only for a pick read from Business Central. The demo
@@ -99,7 +99,48 @@ async function checkBin(req, res) {
   res.status(200).json(result);
 }
 
-/// POST /pick/register — Register (Section 2.11). Partial registration is
+/// GET /pick/documents/:docId/verification[?bcPickId=] — the pick's
+/// dispatch verification (Section 2.11): per item / lot / serial group,
+/// what is picked, what is verified and the status, plus whether Register
+/// or Partial Register may go ahead. Live, read straight from Business
+/// Central — never cached.
+async function getVerification(req, res) {
+  const result = await dataSource.getPickVerification({
+    docId: req.params.docId,
+    bcPickId: req.query.bcPickId || undefined,
+  });
+  assertVisible(result && result.locationCode, req, () => {
+    throw ApiError.notFound(`Pick document "${req.params.docId}" was not found.`);
+  });
+  res.json(result);
+}
+
+/// POST /pick/verification — VERIFY (partial: false, for Register Pick)
+/// or PARTIAL VERIFY (partial: true, for Partial Register Pick). Records
+/// the verifier's dispatch count per group (Section 2.11.5). Live, never
+/// queued: the verifier is standing at the dispatch bin waiting for the
+/// answer, and Register depends on it.
+///
+/// Body: { docId, bcPickId, partial, counts: [{ groupKey, qtyVerified }] }.
+/// Responds { ok, partial, verified, groups, summary }.
+async function verify(req, res) {
+  const { docId, bcPickId, partial, counts } = req.body || {};
+  if (!docId) throw ApiError.badRequest('docId is required.');
+  if (!Array.isArray(counts) || counts.length === 0) {
+    throw ApiError.badRequest('counts must be a non-empty array of { groupKey, qtyVerified }.');
+  }
+  for (const [i, c] of counts.entries()) {
+    if (!c || !c.groupKey || c.qtyVerified == null) {
+      throw ApiError.badRequest(`counts[${i}]: groupKey and qtyVerified are required.`);
+    }
+  }
+  const result = await dataSource.verifyPick({ docId, bcPickId, partial: partial === true, counts });
+  res.status(200).json(result);
+}
+
+/// POST /pick/register — Register (Section 2.12). Refused (409
+/// PICK_NOT_VERIFIED, nothing posted) until the pick is verified — see
+/// verify above. Partial registration is
 /// allowed: what is not saved stays outstanding on the same pick.
 ///
 /// `expected` ([{ bcLineId, bin, qty, sku?, variantCode?, lotNo?,
@@ -120,4 +161,4 @@ async function register(req, res) {
   res.status(200).json(result);
 }
 
-module.exports = { listDocuments, getDocument, confirmItem, confirmBatch, checkBin, register };
+module.exports = { listDocuments, getDocument, getVerification, confirmItem, confirmBatch, checkBin, verify, register };

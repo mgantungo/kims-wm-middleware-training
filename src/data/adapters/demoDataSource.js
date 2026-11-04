@@ -1,6 +1,6 @@
 // src/data/adapters/demoDataSource.js
-// src/data/adapters/demoDataSource.js
 const ApiError = require('../../utils/apiError');
+const pickVerification = require('../../modules/pick/pickVerification');
 
 /**
  * In-memory demo data source. Seeded with the same documents, SKUs, and
@@ -362,9 +362,96 @@ class DemoDataSource {
     return { available: true };
   }
 
+  /// Demo pick lines in Business Central's Take / Place shape, so the demo
+  /// runs the SAME verification rules as Business Central
+  /// (modules/pick/pickVerification.js). A confirmed item counts as picked
+  /// in full; the verifier's counts live on the doc (_verified, per group).
+  _demoPickLines(doc) {
+    const confirmed = doc._confirmed || new Set();
+    const verified = doc._verified || {};
+    const lines = [];
+    const placeByKey = new Map();
+    doc.items.forEach((item, i) => {
+      const scanned = confirmed.has(item.sku) ? item.qty : 0;
+      const take = {
+        id: `demo-take-${i}`,
+        lineNo: (i + 1) * 10000,
+        actionType: 'Take',
+        itemNo: item.sku,
+        itemDesc: item.description,
+        binCode: item.location,
+        qtyOutstanding: item.qty,
+        qtyToHandle: scanned,
+      };
+      lines.push(take);
+      const key = pickVerification.groupKeyOf(take);
+      let place = placeByKey.get(key);
+      if (!place) {
+        place = {
+          id: `demo-place-${key}`,
+          lineNo: 900000 + placeByKey.size,
+          actionType: 'Place',
+          itemNo: item.sku,
+          binCode: 'DISPATCH',
+          qtyOutstanding: 0,
+          qtyToHandle: 0,
+          qtyVerified: verified[key] || 0,
+        };
+        placeByKey.set(key, place);
+        lines.push(place);
+      }
+      place.qtyOutstanding += item.qty;
+      place.qtyToHandle += scanned;
+    });
+    return lines;
+  }
+
+  async getPickVerification(payload) {
+    const { docId } = payload || {};
+    const doc = this._pickDocs[docId];
+    if (!doc) throw ApiError.notFound(`Pick document "${docId}" not found.`);
+    const verification = pickVerification.buildVerification(this._demoPickLines(doc));
+    return { docId, bcPickId: null, locationCode: doc.locationCode || null, ...pickVerification.publicVerification(verification) };
+  }
+
+  /// Demo counterpart to businessCentralDataSource.js's verifyPick — same
+  /// payload, rules and response.
+  async verifyPick(payload) {
+    const { docId, counts } = payload || {};
+    const partial = payload && payload.partial === true;
+    const doc = this._pickDocs[docId];
+    if (!doc) throw ApiError.notFound(`Pick document "${docId}" not found.`);
+    const verification = pickVerification.buildVerification(this._demoPickLines(doc));
+    let entries;
+    try {
+      entries = pickVerification.planVerification(verification, counts, { partial });
+    } catch (e) {
+      throw e.status === 409 ? ApiError.conflict(e.message, e.code) : ApiError.badRequest(e.message, e.code);
+    }
+    doc._verified = doc._verified || {};
+    for (const entry of entries) {
+      doc._verified[String(entry.id).replace(/^demo-place-/, '')] = entry.qtyVerified;
+    }
+    const after = await this.getPickVerification({ docId });
+    const verified = partial ? after.summary.readyForPartialRegister : after.summary.readyForRegister;
+    return { ok: true, partial, verified, ...after };
+  }
+
   async registerPick(payload) {
     const { docId } = payload || {};
     if (!docId) throw ApiError.badRequest('docId is required.');
+    // Same verification gate as Business Central (Section 2.12).
+    const doc = this._pickDocs[docId];
+    if (doc) {
+      const { summary } = pickVerification.buildVerification(this._demoPickLines(doc));
+      if (summary.scannedGroups > 0 && summary.blockingGroups > 0) {
+        throw ApiError.conflict(
+          `Register stopped — nothing was posted. Verify the pick first: ${summary.problems.join(' ')}`,
+          'PICK_NOT_VERIFIED',
+        );
+      }
+      doc._verified = {};
+    }
     // Demo data has nothing outstanding to keep open.
     return { ok: true, fullyRegistered: true };
   }

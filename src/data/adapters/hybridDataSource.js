@@ -183,6 +183,14 @@ class HybridDataSource {
   async confirmPickBatch(...args) { return this._pickConfirmTarget().confirmPickBatch(...args); }
   async registerPick(...args) { return this._pickConfirmTarget().registerPick(...args); }
 
+  /// Verification (Section 2.11) follows the CONFIRM flag, read included:
+  /// it reads what the confirm side wrote (Qty. to Handle per group), and
+  /// Verify writes the dispatch count that gates Register. Reading it from
+  /// one system while saving and registering in the other would never
+  /// line up.
+  async getPickVerification(...args) { return this._pickConfirmTarget().getPickVerification(...args); }
+  async verifyPick(...args) { return this._pickConfirmTarget().verifyPick(...args); }
+
   // ---------------- Everything else — always demo until its own phase ----------------
   async getUnverifiedPicks(...args) { return this._demo.getUnverifiedPicks(...args); }
   async getVerifyPick(...args) { return this._demo.getVerifyPick(...args); }

@@ -11,13 +11,20 @@ router.get('/documents', asyncHandler(controller.listDocuments));
 router.get('/documents/:docId', asyncHandler(controller.getDocument));
 // POST /pick/confirm — single real-time scan (BC Section 2.9).
 router.post('/confirm', asyncHandler(controller.confirmItem));
-// POST /pick/confirm-batch — whole pick in one call, then Register
-// (BC Sections 2.10 + 2.11).
+// POST /pick/confirm-batch — one save of picked units (BC Section 2.10).
 router.post('/confirm-batch', asyncHandler(controller.confirmBatch));
 // POST /pick/check-bin — can this item be taken from the scanned bin?
 // (bin contents, BC Section 2.2.2)
 router.post('/check-bin', asyncHandler(controller.checkBin));
-// POST /pick/register — manual Register (BC Section 2.11).
+// GET /pick/documents/:docId/verification — dispatch verification per
+// item / lot / serial group (BC Section 2.11). Live.
+router.get('/documents/:docId/verification', asyncHandler(controller.getVerification));
+// POST /pick/verification — Verify (partial: false) / Partial Verify
+// (partial: true): the verifier's counts (BC Section 2.11.5). Live.
+// Not under /pick/verify — that path belongs to Verify & Pack (app.js).
+router.post('/verification', asyncHandler(controller.verify));
+// POST /pick/register — manual Register (BC Section 2.12), only once the
+// pick is verified.
 router.post('/register', asyncHandler(controller.register));
 
 module.exports = router;

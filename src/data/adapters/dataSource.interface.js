@@ -218,8 +218,29 @@
  *   item be taken from the bin the operator scanned? Business Central:
  *   Section 2.2.2 bin contents, scoped to the pick's location. Demo:
  *   always available. Routed by PICK_READ_SOURCE (read-only).
+ * getPickVerification(payload)         -> { docId, bcPickId, locationCode,
+ *                                            groups, summary }
+ *   payload: { docId, bcPickId? } — Section 2.11. One group per item /
+ *   variant / lot / serial: { groupKey, sku, description, variantCode,
+ *   lotNo, serialNo, isLotTracked, isSerialTracked, bins: [{ bin, qty }],
+ *   outstanding, scanned, verified, placeToHandle, placeOutstanding,
+ *   maxVerify, stagingBin, status, blocksRegister, placeLineIds, bcStatus }.
+ *   summary: { scannedGroups, verifiedGroups, blockingGroups, scannedUnits,
+ *   verifiedUnits, outstandingUnits, fullyScanned, readyForPartialRegister,
+ *   readyForRegister, problems: string[] }. Rules in
+ *   modules/pick/pickVerification.js. Routed by PICK_CONFIRM_SOURCE.
+ * verifyPick(payload)                   -> { ok, partial, verified, ...getPickVerification }
+ *   payload: { docId, bcPickId?, partial?, counts: [{ groupKey,
+ *   qtyVerified }] } — Section 2.11.5 ProcessBatchVerifications. partial
+ *   false (Verify, for Register Pick) needs the whole pick picked; partial
+ *   true (Partial Verify, for Partial Register Pick) verifies what is picked
+ *   so far. Every picked group must be counted. 409 PICK_NOT_FULLY_PICKED /
+ *   400 PICK_VERIFY_INVALID, nothing saved. `verified` says whether the
+ *   matching Register may now go ahead.
  * registerPick(payload)                 -> { ok: true, fullyRegistered }
- *   payload: { docId, bcPickId?, partial?, expected? } — Section 2.11.
+ *   payload: { docId, bcPickId?, partial?, expected? } — Section 2.12.
+ *   Refused (409 PICK_NOT_VERIFIED, nothing posted) until every picked
+ *   group is verified at exactly the picked quantity.
  *   Partial registration is allowed: unsaved quantity stays outstanding
  *   on the same pick. expected ([{ bcLineId, bin, qty }]) is what the app
  *   saved and has not registered; when sent, Register is refused (409,
