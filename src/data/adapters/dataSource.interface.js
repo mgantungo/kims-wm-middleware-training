@@ -255,7 +255,8 @@
  *                                            notPosted: string[] }
  *   After Register the pick is READ AGAIN and compared with what was to be
  *   posted (confirmed true: posted in Business Central; false: notPosted
- *   names the lines; null: the follow-up read failed).
+ *   names the lines). A failed read-back counts as posted: Business Central
+ *   accepted Register, and a fully registered pick is archived.
  *   payload: { docId, bcPickId?, partial?, expected? } — Section 2.12.
  *   Refused (409 PICK_NOT_VERIFIED, nothing posted) until every picked
  *   group is verified at exactly the picked quantity.

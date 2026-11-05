@@ -1230,7 +1230,13 @@ class BusinessCentralDataSource {
     await this._bcPost(`picks(${bcPickId})/Microsoft.NAV.Register`, {});
     logger.info({ bcPickId }, 'Pick Register accepted by Business Central — confirming');
 
-    const confirmation = await this._confirmPickRegistered({ bcPickId, docNo, posting });
+    // Does this round take everything still outstanding? Then Business
+    // Central archives the pick on Register (it leaves the open picks).
+    const outstandingOf = (l) => (typeof l.qtyOutstanding === 'number' ? l.qtyOutstanding : Number(l.quantity || 0) - Number(l.qtyHandled || 0));
+    const takesAll = [...lines.values()]
+      .filter((l) => l.actionType === 'Take')
+      .every((l) => Number(l.qtyToHandle || 0) >= outstandingOf(l));
+    const confirmation = await this._confirmPickRegistered({ bcPickId, docNo, posting, takesAll });
     logger[confirmation.confirmed ? 'info' : 'warn'](
       { bcPickId, docNo, ...confirmation },
       confirmation.confirmed
@@ -1251,9 +1257,14 @@ class BusinessCentralDataSource {
   /// Read by number (a filter answers [] when the pick is gone, rather than
   /// an error); by id when no number was given.
   /// Returns { fullyRegistered, confirmed, postedUnits, remainingUnits,
-  /// notPosted: string[] } — confirmed null when the follow-up read failed
-  /// (Register itself was accepted; the app says so and asks for a check).
-  async _confirmPickRegistered({ bcPickId, docNo, posting }) {
+  /// notPosted: string[] }.
+  ///
+  /// A failed read-back is NOT a failure: Business Central accepted the
+  /// Register, and a pick registered in full is archived — gone from the
+  /// open picks — so there may be nothing left to read. It is then taken as
+  /// posted as sent (confirmed true); fully registered when this round took
+  /// everything outstanding ([takesAll]).
+  async _confirmPickRegistered({ bcPickId, docNo, posting, takesAll = false }) {
     const toPost = posting.reduce((s, l) => s + Number(l.qtyToHandle || 0), 0);
     let after;
     try {
@@ -1265,8 +1276,17 @@ class BusinessCentralDataSource {
         after = await this._bcGet(`picks(${bcPickId})?$expand=pickLines`);
       }
     } catch (error) {
-      logger.warn({ bcPickId, err: error }, 'Pick register confirmation read failed');
-      return { fullyRegistered: false, confirmed: null, postedUnits: null, remainingUnits: null, notPosted: [] };
+      logger.info(
+        { bcPickId, docNo, err: error.message },
+        'Pick read-back after Register failed — Register was accepted; taken as posted (a fully registered pick is archived)',
+      );
+      return {
+        fullyRegistered: takesAll,
+        confirmed: true,
+        postedUnits: toPost,
+        remainingUnits: takesAll ? 0 : null,
+        notPosted: [],
+      };
     }
     if (!after) {
       return { fullyRegistered: true, confirmed: true, postedUnits: toPost, remainingUnits: 0, notPosted: [] };
