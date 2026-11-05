@@ -213,6 +213,9 @@ function publicVerification(v) {
  * verification, and turns it into Business Central's verification entries
  * (Section 2.11.5: [{ id: <Place line id>, qtyVerified }]).
  *
+ * Verify (Update Verification) must count every picked group; Partial
+ * Verify may count only some of them (the others are left as they are).
+ *
  * counts: [{ groupKey, qtyVerified }]. qtyVerified is ABSOLUTE (a resend
  * replaces, so a retry is safe). A group with several Place lines gets the
  * count spread in line order, each up to its own Qty. to Handle, any excess
@@ -287,8 +290,11 @@ function planVerification(verification, counts, { partial }) {
     });
   });
 
+  // Update Verification counts every picked item. Partial Verify sends only
+  // what has been counted so far (some items, lots or serials) — the rest
+  // stays to verify, and the pick stays on Pick Verify until it is counted.
   const missing = groups.filter((g) => g.scanned > 0 && !seen.has(g.groupKey));
-  if (missing.length > 0) {
+  if (!partial && missing.length > 0) {
     problems.push(
       `Count every picked item before verifying — missing: ${missing
         .map((g) => `${g.sku}${g.lotNo ? ` lot ${g.lotNo}` : ''}${g.serialNo ? ` serial ${g.serialNo}` : ''}`)
