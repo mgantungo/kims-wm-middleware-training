@@ -157,7 +157,10 @@ async function verify(req, res) {
 /// sent, Register is refused (409, nothing posted) if Business Central's
 /// Qty. to Handle differs from it — e.g. Business Central's own automatic
 /// fill on lines nobody picked. `partial` is informational (logged).
-/// Responds { ok, fullyRegistered }.
+/// Responds { ok, fullyRegistered, confirmed, postedUnits, remainingUnits,
+/// notPosted } — the pick is read again after Register to confirm Business
+/// Central posted it (see businessCentralDataSource.js's
+/// _confirmPickRegistered).
 async function register(req, res) {
   const { docId, bcPickId, partial, expected } = req.body || {};
   if (!docId) {

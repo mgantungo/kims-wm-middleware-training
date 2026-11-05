@@ -1221,24 +1221,85 @@ class BusinessCentralDataSource {
     // posted either way.
     this._assertVerifiedForRegister([...lines.values()], bcPickId);
 
-    logger.info({ bcPickId }, 'Pick → Business Central Register');
-    await this._bcPost(`picks(${bcPickId})/Microsoft.NAV.Register`, {});
-    logger.info({ bcPickId }, 'Pick registered');
+    // What this round posts: every Take line with something to handle.
+    const posting = [...lines.values()].filter((l) => l.actionType === 'Take' && Number(l.qtyToHandle || 0) > 0);
+    const unitsToPost = posting.reduce((s, l) => s + Number(l.qtyToHandle || 0), 0);
+    const docNo = payload.docId || null;
 
-    let fullyRegistered = false;
+    logger.info({ bcPickId, docNo, unitsToPost }, 'Pick → Business Central Register');
+    await this._bcPost(`picks(${bcPickId})/Microsoft.NAV.Register`, {});
+    logger.info({ bcPickId }, 'Pick Register accepted by Business Central — confirming');
+
+    const confirmation = await this._confirmPickRegistered({ bcPickId, docNo, posting });
+    logger[confirmation.confirmed ? 'info' : 'warn'](
+      { bcPickId, docNo, ...confirmation },
+      confirmation.confirmed
+        ? `Pick registered in Business Central: ${confirmation.postedUnits} unit(s) posted`
+        : 'Pick Register accepted, but Business Central does not show everything posted',
+    );
+    return { ok: true, ...confirmation };
+  }
+
+  /// REGISTER CONFIRMATION (Section 2.12 "Partial Registration"). Business
+  /// Central answers 200 to Register, but the app must KNOW it was posted,
+  /// so the pick is read again and compared with what was to be posted:
+  ///   line gone from the pick ........ fully handled (removed by BC);
+  ///   line still there ............... its qtyHandled must have risen by
+  ///                                    what it had to handle, and its
+  ///                                    qtyToHandle / qtyVerified be back at 0;
+  ///   pick gone altogether ........... fully registered.
+  /// Read by number (a filter answers [] when the pick is gone, rather than
+  /// an error); by id when no number was given.
+  /// Returns { fullyRegistered, confirmed, postedUnits, remainingUnits,
+  /// notPosted: string[] } — confirmed null when the follow-up read failed
+  /// (Register itself was accepted; the app says so and asks for a check).
+  async _confirmPickRegistered({ bcPickId, docNo, posting }) {
+    const toPost = posting.reduce((s, l) => s + Number(l.qtyToHandle || 0), 0);
+    let after;
     try {
-      const after = await this._fetchPickLinesById(bcPickId);
-      fullyRegistered = ![...after.values()].some(
-        (l) =>
-          l.actionType === 'Take' &&
-          (typeof l.qtyOutstanding === 'number' ? l.qtyOutstanding : Number(l.quantity || 0)) > 0,
-      );
+      if (docNo) {
+        const escaped = String(docNo).replace(/'/g, "''");
+        const data = await this._bcGet(`picks?$expand=pickLines&$filter=no eq '${escaped}'`);
+        after = (data.value || [])[0] || null;
+      } else {
+        after = await this._bcGet(`picks(${bcPickId})?$expand=pickLines`);
+      }
     } catch (error) {
-      // Business Central removes a fully registered pick — the follow-up
-      // read then fails. The Register itself succeeded.
-      fullyRegistered = true;
+      logger.warn({ bcPickId, err: error }, 'Pick register confirmation read failed');
+      return { fullyRegistered: false, confirmed: null, postedUnits: null, remainingUnits: null, notPosted: [] };
     }
-    return { ok: true, fullyRegistered };
+    if (!after) {
+      return { fullyRegistered: true, confirmed: true, postedUnits: toPost, remainingUnits: 0, notPosted: [] };
+    }
+
+    const byId = new Map((after.pickLines || []).map((l) => [l.id, l]));
+    const outstanding = (l) => (typeof l.qtyOutstanding === 'number' ? l.qtyOutstanding : Number(l.quantity || 0) - Number(l.qtyHandled || 0));
+    let postedUnits = 0;
+    const notPosted = [];
+    for (const before of posting) {
+      const want = Number(before.qtyToHandle || 0);
+      const now = byId.get(before.id);
+      if (!now) {
+        postedUnits += want; // fully handled — removed from the pick
+        continue;
+      }
+      const posted = Number(now.qtyHandled || 0) - Number(before.qtyHandled || 0);
+      postedUnits += Math.max(0, Math.min(posted, want));
+      const what = [before.itemNo, before.lotNo ? `lot ${before.lotNo}` : null, before.binCode ? `bin ${before.binCode}` : null]
+        .filter(Boolean)
+        .join(', ');
+      if (posted < want) notPosted.push(`${what}: ${want} to post, ${Math.max(0, posted)} posted`);
+      else if (Number(now.qtyToHandle || 0) !== 0) notPosted.push(`${what}: still ${now.qtyToHandle} set to handle after Register`);
+    }
+    const takes = (after.pickLines || []).filter((l) => l.actionType === 'Take');
+    const remainingUnits = takes.reduce((s, l) => s + Math.max(0, outstanding(l)), 0);
+    return {
+      fullyRegistered: remainingUnits === 0,
+      confirmed: notPosted.length === 0,
+      postedUnits,
+      remainingUnits,
+      notPosted,
+    };
   }
 
   /// Refuses Register (409 PICK_NOT_VERIFIED, nothing posted) unless every

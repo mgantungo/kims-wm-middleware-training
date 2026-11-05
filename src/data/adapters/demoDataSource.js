@@ -477,8 +477,9 @@ class DemoDataSource {
       }
       doc._verified = {};
     }
-    // Demo data has nothing outstanding to keep open.
-    return { ok: true, fullyRegistered: true };
+    // Demo data has nothing outstanding to keep open. Same shape as Business
+    // Central's confirmed Register.
+    return { ok: true, fullyRegistered: true, confirmed: true, postedUnits: null, remainingUnits: 0, notPosted: [] };
   }
 
   // ------------------------------------------------------------------

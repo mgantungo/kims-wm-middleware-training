@@ -250,7 +250,12 @@
  *   so far. Every picked group must be counted. 409 PICK_NOT_FULLY_PICKED /
  *   400 PICK_VERIFY_INVALID, nothing saved. `verified` says whether the
  *   matching Register may now go ahead.
- * registerPick(payload)                 -> { ok: true, fullyRegistered }
+ * registerPick(payload)                 -> { ok: true, fullyRegistered, confirmed,
+ *                                            postedUnits, remainingUnits,
+ *                                            notPosted: string[] }
+ *   After Register the pick is READ AGAIN and compared with what was to be
+ *   posted (confirmed true: posted in Business Central; false: notPosted
+ *   names the lines; null: the follow-up read failed).
  *   payload: { docId, bcPickId?, partial?, expected? } — Section 2.12.
  *   Refused (409 PICK_NOT_VERIFIED, nothing posted) until every picked
  *   group is verified at exactly the picked quantity.
