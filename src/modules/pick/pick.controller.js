@@ -115,9 +115,10 @@ async function getVerification(req, res) {
   res.json(result);
 }
 
-/// GET /pick/verification — the "Verify Pick" list: picks with picked
-/// items waiting to be verified at dispatch (counted short / over
-/// included), scoped to the operator's location like the pick list.
+/// GET /pick/verification — the "Verify Pick" list, both tabs: picks with
+/// picked items waiting to be verified at dispatch (stage 'toVerify') and
+/// picks verified and waiting on Register (stage 'toRegister'), scoped to
+/// the operator's location like the pick list.
 async function listToVerify(req, res) {
   const result = await dataSource.getPicksToVerify();
   res.json({ ...result, picks: filterByLocation(result.picks, req, (p) => p.locationCode) });

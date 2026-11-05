@@ -301,13 +301,24 @@ class DemoDataSource {
   // Pick
   // ------------------------------------------------------------------
   async getPickDocuments() {
-    return { documents: Object.values(this._pickDocs).map(stripInternal) };
+    return { documents: Object.values(this._pickDocs).map((d) => this._withVerificationStage(d)) };
   }
 
   async getPickDocument(docId) {
     const doc = this._pickDocs[docId];
     if (!doc) throw ApiError.notFound(`Pick document "${docId}" not found.`);
-    return stripInternal(doc);
+    return this._withVerificationStage(doc);
+  }
+
+  /// Same additive fields as businessCentralDataSource.js's _mapPick.
+  _withVerificationStage(doc) {
+    const verification = pickVerification.buildVerification(this._demoPickLines(doc));
+    const { stage } = pickVerification.verificationStage(verification);
+    return {
+      ...stripInternal(doc),
+      verificationStage: stage,
+      registerKind: stage ? (verification.summary.fullyScanned ? 'full' : 'partial') : null,
+    };
   }
 
   async confirmPickItem(payload) {
@@ -414,11 +425,12 @@ class DemoDataSource {
     return { docId, bcPickId: null, locationCode: doc.locationCode || null, ...pickVerification.publicVerification(verification) };
   }
 
-  /// Demo counterpart to businessCentralDataSource.js's getPicksToVerify.
+  /// Demo counterpart to businessCentralDataSource.js's getPicksToVerify
+  /// (both stages).
   async getPicksToVerify() {
     const picks = Object.values(this._pickDocs)
       .map((doc) =>
-        pickVerification.readyToVerifyEntry(
+        pickVerification.verificationListEntry(
           { no: doc.docId, id: null, locationCode: doc.locationCode, assignedUserId: null, assignmentDate: doc.dueDate },
           pickVerification.buildVerification(this._demoPickLines(doc)),
         ),
@@ -1014,7 +1026,7 @@ class DemoDataSource {
 }
 
 function stripInternal(doc) {
-  const { _confirmed, _confirmedQty, _scanLogs, _saved, _held, ...rest } = doc;
+  const { _confirmed, _confirmedQty, _scanLogs, _saved, _held, _verified, ...rest } = doc;
   return rest;
 }
 

@@ -231,12 +231,17 @@
  *   modules/pick/pickVerification.js. Routed by PICK_CONFIRM_SOURCE.
  * getPicksToVerify()                    -> { picks: [{ docId, bcPickId, locationCode,
  *                                            assignedUserId, assignmentDate,
- *                                            stagingBins, itemsToVerify,
+ *                                            stagingBins, stage, registerKind,
+ *                                            itemsToVerify, itemsVerified,
  *                                            itemsPicked, unitsToVerify,
- *                                            pickedUnits, hasMismatch,
- *                                            fullyScanned }] }
- *   The "Verify Pick" list: picks with picked items not yet verified at the
- *   picked quantity. Routed by PICK_CONFIRM_SOURCE.
+ *                                            verifiedUnits, pickedUnits,
+ *                                            hasMismatch, fullyScanned }] }
+ *   The "Verify Pick" list, both tabs: stage 'toVerify' (picked items not
+ *   yet verified at the picked quantity) or 'toRegister' (all picked items
+ *   verified, not registered — registerKind 'full' for Register Pick,
+ *   'partial' for Partial Register Pick). Routed by PICK_CONFIRM_SOURCE.
+ *   PickDocument also carries verificationStage / registerKind (same
+ *   meaning; null when nothing is picked in this round).
  * verifyPick(payload)                   -> { ok, partial, verified, ...getPickVerification }
  *   payload: { docId, bcPickId?, partial?, counts: [{ groupKey,
  *   qtyVerified }] } — Section 2.11.5 ProcessBatchVerifications. partial

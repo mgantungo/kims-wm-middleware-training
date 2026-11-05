@@ -300,15 +300,34 @@ function planVerification(verification, counts, { partial }) {
 }
 
 /**
- * One pick's row in the "ready to verify" list: picked (saved to Business
- * Central) items that are not verified at the picked quantity yet —
- * awaiting a count, or counted short / over. Null when the pick has nothing
- * to verify (nothing picked, or everything picked is already verified).
+ * Where a pick stands between picking and registering:
+ *   'toVerify' .... picked (saved) items not verified at the picked quantity
+ *                   yet — awaiting a count, counted short / over, or anything
+ *                   else that blocks Register;
+ *   'toRegister' .. everything picked is verified — Register Pick when the
+ *                   whole pick is picked (registerKind 'full'), Partial
+ *                   Register Pick when only part of it is ('partial');
+ *   null .......... nothing picked in this round.
+ * A pick picked further after its verification moves back to 'toVerify'
+ * by itself: its counts no longer match.
  */
-function readyToVerifyEntry(header, verification) {
+function verificationStage(verification) {
   const { groups, summary } = verification;
-  const toVerify = groups.filter((g) => g.scanned > 0 && g.status !== STATUS.verified);
-  if (toVerify.length === 0) return null;
+  const open = groups.filter((g) => (g.scanned > 0 && g.status !== STATUS.verified) || g.blocksRegister);
+  if (open.length > 0) return { stage: 'toVerify', open };
+  if (summary.scannedGroups > 0) return { stage: 'toRegister', open };
+  return { stage: null, open };
+}
+
+/**
+ * One pick's row in the Verify Pick list (both tabs). Null when nothing is
+ * picked in this round.
+ */
+function verificationListEntry(header, verification) {
+  const { groups, summary } = verification;
+  const { stage, open } = verificationStage(verification);
+  if (!stage) return null;
+  const verified = groups.filter((g) => g.scanned > 0 && g.status === STATUS.verified);
   return {
     docId: header.no,
     bcPickId: header.id || null,
@@ -316,12 +335,17 @@ function readyToVerifyEntry(header, verification) {
     assignedUserId: header.assignedUserId || null,
     assignmentDate: header.assignmentDate || null,
     stagingBins: [...new Set(groups.map((g) => g.stagingBin).filter(Boolean))],
-    itemsToVerify: toVerify.length,
+    stage,
+    // Which Register applies once verified (and on the To Register tab).
+    registerKind: summary.fullyScanned ? 'full' : 'partial',
+    itemsToVerify: open.length,
+    itemsVerified: verified.length,
     itemsPicked: summary.scannedGroups,
-    unitsToVerify: toVerify.reduce((s, g) => s + g.scanned, 0),
+    unitsToVerify: open.reduce((s, g) => s + g.scanned, 0),
+    verifiedUnits: verified.reduce((s, g) => s + g.scanned, 0),
     pickedUnits: summary.scannedUnits,
     // Some count was recorded and does not match — count again.
-    hasMismatch: toVerify.some((g) => g.status === STATUS.under || g.status === STATUS.over),
+    hasMismatch: open.some((g) => g.status === STATUS.under || g.status === STATUS.over),
     // The whole outstanding pick is picked: Verify (for Register Pick);
     // otherwise Partial Verify (for Partial Register Pick).
     fullyScanned: summary.fullyScanned,
@@ -329,7 +353,8 @@ function readyToVerifyEntry(header, verification) {
 }
 
 module.exports = {
-  readyToVerifyEntry,
+  verificationStage,
+  verificationListEntry,
   STATUS,
   blocksRegister,
   groupKeyOf,

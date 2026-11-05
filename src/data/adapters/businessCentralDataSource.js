@@ -842,6 +842,10 @@ class BusinessCentralDataSource {
     if (items.length === 0) return null;
 
     const stagingBins = [...new Set(placeLines.map((p) => norm(p.binCode)).filter(Boolean))];
+    // Verification stage of this round (Section 2.11) — the pick list
+    // shows "To register" for a pick verified and waiting on Register.
+    const verification = pickVerification.buildVerification(lines);
+    const { stage } = pickVerification.verificationStage(verification);
 
     return {
       docId: bc.no,
@@ -861,6 +865,8 @@ class BusinessCentralDataSource {
       locationCode: bc.locationCode,
       assignedUserId: bc.assignedUserId || null,
       stagingBins,
+      verificationStage: stage,
+      registerKind: stage ? (verification.summary.fullyScanned ? 'full' : 'partial') : null,
     };
   }
 
@@ -1282,17 +1288,24 @@ class BusinessCentralDataSource {
     };
   }
 
-  /// The "Verify Pick" list: every pick with picked items not yet verified
-  /// at the picked quantity (Section 2.11) — one read of all picks with
-  /// their lines. Returns { picks: [readyToVerifyEntry] }, most items to
-  /// verify first.
+  /// The "Verify Pick" list, both tabs (Section 2.11): every pick with
+  /// something picked in this round, each with its stage — 'toVerify'
+  /// (picked items not verified yet) or 'toRegister' (all picked items
+  /// verified, not registered; registerKind 'full' / 'partial'). One read
+  /// of all picks with their lines. Returns { picks: [verificationListEntry] }:
+  /// To Verify first (most items to verify first), then To Register.
   async getPicksToVerify() {
     const data = await this._bcGet('picks?$expand=pickLines');
+    const rank = (p) => (p.stage === 'toVerify' ? 0 : 1);
     const picks = (data.value || [])
-      .map((p) => pickVerification.readyToVerifyEntry(p, pickVerification.buildVerification(p.pickLines || [])))
+      .map((p) => pickVerification.verificationListEntry(p, pickVerification.buildVerification(p.pickLines || [])))
       .filter(Boolean)
-      .sort((a, b) => b.itemsToVerify - a.itemsToVerify || String(a.docId).localeCompare(String(b.docId)));
-    logger.info({ picks: picks.map((p) => `${p.docId}:${p.itemsToVerify}`) }, `Picks ready to verify: ${picks.length}`);
+      .sort((a, b) => rank(a) - rank(b) || b.itemsToVerify - a.itemsToVerify || String(a.docId).localeCompare(String(b.docId)));
+    logger.info(
+      { picks: picks.map((p) => `${p.docId}:${p.stage}`) },
+      `Verify Pick list: ${picks.filter((p) => p.stage === 'toVerify').length} to verify, ` +
+        `${picks.filter((p) => p.stage === 'toRegister').length} to register`,
+    );
     return { picks };
   }
 
